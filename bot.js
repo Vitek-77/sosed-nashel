@@ -126,3 +126,4 @@ process.on("unhandledRejection", (err) => {
 
 console.log("🚀 «Сосед нашёл!» (Москва и МО) запускается…");
 bot.start();
+
