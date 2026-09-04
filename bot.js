@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v4: обход защиты — парсим МОБИЛЬНУЮ версию m.aliexpress.ru
+// v5: гибрид — автопарсинг ИЛИ карточка по строке "назв | цена | старая"
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -11,8 +11,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
 
 const bot = new Bot(TOKEN);
+const pending = new Map(); // юзер -> ссылка, ждущая строку данных
 
-// ── ОБЛАЧНАЯ ПАМЯТЬ (Supabase) ───────────────────────────
+// ── ОБЛАЧНАЯ ПАМЯТЬ ──────────────────────────────────────
 async function sb(path, opts = {}) {
     const res = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
         method: opts.method || "GET",
@@ -37,7 +38,6 @@ async function saveProduct(p) {
     } catch (e) { console.log("⚠️ Запись БД: " + e.message); }
 }
 
-// ── ЧТЕНИЕ ТЕКСТА СООБЩЕНИЯ ──────────────────────────────
 function getText(ctx) {
     if (ctx.text && typeof ctx.text === "string") return ctx.text;
     if (ctx.message?.text && typeof ctx.message.text === "string") return ctx.message.text;
@@ -46,25 +46,20 @@ function getText(ctx) {
     return "";
 }
 
-// ── ВСПОМОГАТЕЛЬНЫЕ ──────────────────────────────────────
 function grab(html, re) { const m = html.match(re); return m ? m[1] : ""; }
 function decode(s) {
-    return String(s || "")
-        .replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+    return String(s || "").replace(/&quot;/g, '"').replace(/&amp;/g, "&")
         .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 function metaContent(html, prop) {
-    const tag = html.match(new RegExp('<meta[^>]*property=["\']' + prop + '["\'][^>]*>', "i"))
-        || html.match(new RegExp('<meta[^>]*name=["\']' + prop + '["\'][^>]*>', "i"));
+    const tag = html.match(new RegExp('<meta[^>]*property=["\']' + prop + '["\'][^>]*>', "i"));
     if (!tag) return "";
     const c = tag[0].match(/content=["']([^"']*)["']/);
     return c ? decode(c[1]) : "";
 }
-function fmtPrice(n) {
-    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-}
+function fmtPrice(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
 
-// ── ПАРСЕР v4: МОБИЛЬНАЯ ВЕРСИЯ СТРАНИЦЫ ─────────────────
+// ── АВТОПАРСЕР (пробуем мобильную версию) ────────────────
 async function fetchProduct(url) {
     const id = (url.match(/item\/(\d+)/) || [])[1];
     const target = id ? `https://m.aliexpress.ru/item/${id}.html` : url;
@@ -76,74 +71,48 @@ async function fetchProduct(url) {
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const html = await res.text();
-    const p = { title: "", image: "", price: "", oldPrice: "", discount: "", sold: "", rating: "" };
-
-    // НАЗВАНИЕ
+    const p = { title: "", price: "", oldPrice: "", discount: "", sold: "", rating: "", image: "" };
     const h1 = grab(html, /<h1[^>]*>([\s\S]*?)<\/h1>/i);
     if (h1) p.title = decode(h1.replace(/<[^>]+>/g, "").trim());
     if (!p.title) p.title = metaContent(html, "og:title");
-    if (!p.title) {
-        const t = grab(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
-        p.title = decode(t).split(/—|–|\|/)[0].replace(/купить.*/i, "").trim();
-    }
-
-    // ФОТО
-    p.image = metaContent(html, "og:image");
-
-    // ЦЕНЫ из JSON
-    p.price = grab(html, /"salePrice"\s*:\s*"?([\d.,]+)"?/)
-        || grab(html, /"activityPrice"\s*:\s*"?([\d.,]+)"?/)
-        || grab(html, /"displayPrice"\s*:\s*"?([\d.,]+)"?/);
+    p.price = grab(html, /"salePrice"\s*:\s*"?([\d.,]+)"?/);
     p.oldPrice = grab(html, /"originalPrice"\s*:\s*"?([\d.,]+)"?/);
-
-    // ЦЕНЫ из текста: первые две "N ₽"
     if (!p.price) {
         const nums = [...html.matchAll(/([\d][\d\s\u00A0]{1,9})\s*₽/g)]
-            .map(m => m[1].replace(/[\s\u00A0]/g, ""))
-            .filter(v => /^\d{2,7}$/.test(v));
+            .map(m => m[1].replace(/[\s\u00A0]/g, "")).filter(v => /^\d{2,7}$/.test(v));
         if (nums[0]) p.price = nums[0];
         if (nums[1] && Number(nums[1]) > Number(nums[0])) p.oldPrice = nums[1];
     }
-
-    // СКИДКА, КУПИЛИ, РЕЙТИНГ
     p.discount = grab(html, /[-−](\d{1,2})\s*%/) || "";
     p.sold = grab(html, /([\d][\d\s\u00A0]*)\s*купили/).trim();
-    p.rating = grab(html, /"averageStar"\s*:\s*"([\d.]+)"/)
-        || grab(html, /"evarageStar"\s*:\s*"([\d.]+)"/);
-
-    console.log(`🔎 v4: ${p.title} | ${p.price}→${p.oldPrice} | −${p.discount}% | купили:${p.sold} | фото:${p.image ? "есть" : "нет"}`);
+    p.image = metaContent(html, "og:image");
     return p;
 }
 
-// ── КОРОТКАЯ РЕФ-ССЫЛКА ──────────────────────────────────
 function makeRefLink(productUrl) {
     const id = (productUrl.match(/item\/(\d+)/) || [])[1];
     if (id) return `https://aliexpress.ru/item/${id}.html?aff_short_key=${AFF_KEY}`;
-    try {
-        const u = new URL(productUrl);
-        u.search = `?aff_short_key=${AFF_KEY}`;
-        return u.toString();
-    } catch (e) { return productUrl; }
+    return productUrl;
 }
 
-// ── КАРТОЧКА ─────────────────────────────────────────────
 function buildCard(p, ref) {
     const lines = ["👀 Сосед нашёл!", ""];
-    lines.push("🏷️ " + (p.title || "Товар с AliExpress"));
+    lines.push("🏷️ " + p.title);
     const extra = [];
-    if (p.rating) extra.push("⭐ " + p.rating.replace(".", ","));
+    if (p.rating) extra.push("⭐ " + String(p.rating).replace(".", ","));
     if (p.sold) extra.push("🛒 купили: " + p.sold);
     if (extra.length) lines.push(extra.join(" | "));
-    if (p.price) {
-        let line = "💰 " + (p.oldPrice ? `Было ${fmtPrice(p.oldPrice)} ₽ → стало ` : "") + fmtPrice(p.price) + " ₽";
-        if (p.discount) line += ` (−${p.discount}%)`;
-        lines.push(line);
+    let line = "💰 ";
+    if (p.oldPrice && Number(p.oldPrice) > Number(p.price)) {
+        line += `Было ${fmtPrice(p.oldPrice)} ₽ → стало `;
+        if (!p.discount) p.discount = String(Math.round((1 - Number(p.price) / Number(p.oldPrice)) * 100));
     }
-    lines.push("", "👉 Забрать со скидкой:", ref);
+    line += fmtPrice(p.price) + " ₽";
+    if (p.discount) line += ` (−${p.discount}%)`;
+    lines.push(line, "", "👉 Забрать со скидкой:", ref);
     return lines.join("\n");
 }
 
-// ── ОТПРАВКА В КАНАЛ ─────────────────────────────────────
 async function postToChannel(text) {
     if (!CHANNEL_ID) { console.log("⚠️ CHANNEL_ID не задан"); return false; }
     try {
@@ -156,6 +125,24 @@ async function postToChannel(text) {
     }
 }
 
+async function publish(p, link, uid) {
+    const ref = makeRefLink(link);
+    const ok = await postToChannel(buildCard(p, ref));
+    await saveProduct({
+        source: "aliexpress",
+        external_id: (link.match(/item\/(\d+)/) || [])[1] || link,
+        title: p.title,
+        price_new: parseInt(String(p.price).replace(/\D/g, "")) || null,
+        price_old: parseInt(String(p.oldPrice).replace(/\D/g, "")) || null,
+        discount_percent: parseInt(p.discount) || null,
+        image_url: p.image || null,
+        original_url: link, ref_url: ref,
+        category: "manual", status: "posted",
+        posted_at: new Date().toISOString()
+    });
+    await bot.api.sendMessageToUser(uid, ok ? "✅ Готово! Красивая карточка в канале." : "❌ В канал не выложил — проверь CHANNEL_ID.");
+}
+
 function chatInfo(ctx) {
     const c = ctx.chat || ctx.message?.chat || ctx.message?.recipient || {};
     return { id: c.chat_id ?? c.id ?? null, type: c.chat_type ?? c.type ?? "?" };
@@ -166,38 +153,51 @@ bot.hears(/.*/, async (ctx) => {
     const uid = ctx.message?.sender?.user_id ?? ctx.from?.user_id ?? null;
     const text = getText(ctx);
     console.log(`💬 Чат: ${info.id} (${info.type}) | Юзер: ${uid} | Текст: ${text}`);
+    if (!uid || String(info.type).includes("channel")) return;
 
-    const isChannel = String(info.type).includes("channel");
-    if (!uid || isChannel) return;
-
-    // ССЫЛКА НА ТОВАР → КАРТОЧКА
-    const link = text.match(/https?:\/\/[^\s]+/);
-    if (link && /aliexpress\.ru/i.test(link[0])) {
-        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, делаю карточку…");
-        try {
-            const p = await fetchProduct(link[0]);
-            const ref = makeRefLink(link[0]);
-            const ok = await postToChannel(buildCard(p, ref));
-            await saveProduct({
-                source: "aliexpress",
-                external_id: (link[0].match(/item\/(\d+)/) || [])[1] || link[0],
-                title: p.title || link[0],
-                price_new: parseInt(String(p.price).replace(/\D/g, "")) || null,
-                price_old: parseInt(String(p.oldPrice).replace(/\D/g, "")) || null,
-                discount_percent: parseInt(p.discount) || null,
-                image_url: p.image || null,
-                original_url: link[0], ref_url: ref,
-                category: "manual", status: "posted",
-                posted_at: new Date().toISOString()
-            });
-            await bot.api.sendMessageToUser(uid, ok ? "✅ Готово! Карточка в канале." : "❌ В канал не выложил — проверь CHANNEL_ID.");
-        } catch (e) {
-            await bot.api.sendMessageToUser(uid, "⚠️ Не смог прочитать товар: " + e.message);
+    // РЕЖИМ 1: ждём строку данных после закрытой страницы
+    if (pending.has(uid) && !/https?:\/\//.test(text)) {
+        if (text.trim().toLowerCase() === "отмена") { pending.delete(uid); await bot.api.sendMessageToUser(uid, " Отменил."); return; }
+        const parts = text.split("|").map(s => s.trim());
+        if (parts.length >= 2 && parts[0] && /^\d+$/.test(parts[1].replace(/\s/g, ""))) {
+            const link = pending.get(uid);
+            pending.delete(uid);
+            await publish({
+                title: parts[0],
+                price: parts[1].replace(/\s/g, ""),
+                oldPrice: (parts[2] || "").replace(/\s/g, ""),
+                discount: "", sold: (parts[3] || ""), rating: "", image: ""
+            }, link, uid);
+        } else {
+            await bot.api.sendMessageToUser(uid, "🤔 Не понял формат. Нужно: название | цена | старая цена\n(слово «отмена» — отменить)");
         }
         return;
     }
 
-    // "тест"
+    // РЕЖИМ 2: ссылка на товар
+    const link = text.match(/https?:\/\/[^\s]+/);
+    if (link && /aliexpress\.ru/i.test(link[0])) {
+        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, пробую считать товар…");
+        try {
+            const p = await fetchProduct(link[0]);
+            if (p.title && p.price) {
+                await publish(p, link[0], uid);
+            } else {
+                pending.set(uid, link[0]);
+                await bot.api.sendMessageToUser(uid,
+                    "🔒 Али закрыл страницу от сервера. Делаем карточку вручную — пришли ОДНУ строку:\n\n" +
+                    "название | цена | старая цена | купили\n\n" +
+                    "Пример: ELEGOO ASA нить для 3D-печати 1 кг | 1209 | 2283 | 2896\n\n" +
+                    "(«отмена» — отменить)");
+            }
+        } catch (e) {
+            pending.set(uid, link[0]);
+            await bot.api.sendMessageToUser(uid, "⚠️ Страница не открылась (" + e.message + "). Пришли строку: название | цена | старая цена");
+        }
+        return;
+    }
+
+    // РЕЖИМ 3: "тест"
     if (text.trim().toLowerCase() === "тест") {
         const ok = await postToChannel([
             "👀 Сосед нашёл!", "",
@@ -219,7 +219,6 @@ http.createServer((req, res) => {
     res.end("Сосед нашёл! работает ✅");
 }).listen(port, () => console.log("🌐 Веб-сервер на порту " + port));
 
-// ── АВТОПЕРЕЗАПУСК ───────────────────────────────────────
 process.on("unhandledRejection", (err) => {
     const msg = String(err?.message ?? err) + " " + String(err?.cause?.message ?? "");
     console.error("⚠️ Ошибка: " + msg);
@@ -229,5 +228,5 @@ process.on("unhandledRejection", (err) => {
     }
 });
 
-console.log("🚀 «Сосед нашёл!» v4 (мобильный парсер) запускается…");
+console.log("🚀 «Сосед нашёл!» v5 (гибрид) запускается…");
 bot.start();
