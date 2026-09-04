@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v1: регистратор ID чата + тестовый пост + облачная память
+// v1.1: исправлен приём текста сообщений
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -46,6 +46,15 @@ async function logPost(productId) {
     catch (e) { console.log("⚠️ Лог БД: " + e.message); }
 }
 
+// ── ЧТЕНИЕ ТЕКСТА (ищем во всех местах) ──────────────────
+function getText(ctx) {
+    if (ctx.text && typeof ctx.text === "string") return ctx.text;
+    if (ctx.message?.text && typeof ctx.message.text === "string") return ctx.message.text;
+    if (ctx.message?.body?.text && typeof ctx.message.body.text === "string") return ctx.message.body.text;
+    if (ctx.body?.text && typeof ctx.body.text === "string") return ctx.body.text;
+    return "";
+}
+
 // ── ОТПРАВКА В КАНАЛ ─────────────────────────────────────
 async function postToChannel(text) {
     if (!CHANNEL_ID) { console.log("⚠️ CHANNEL_ID не задан"); return false; }
@@ -82,7 +91,7 @@ function chatInfo(ctx) {
 bot.hears(/.*/, async (ctx) => {
     const info = chatInfo(ctx);
     const uid = ctx.message?.sender?.user_id ?? ctx.from?.user_id ?? null;
-    const text = ctx.message?.text ?? ctx.text ?? "";
+    const text = getText(ctx);
     console.log(`💬 Чат: ${info.id} (${info.type}) | Юзер: ${uid} | Текст: ${text}`);
 
     // ТЕСТ: напиши боту в личку слово "тест" — он выложит пробную карточку
