@@ -1,0 +1,9 @@
+{
+  "name": "sosed-nashel",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bot.js",
+  "dependencies": {
+    "@maxhub/max-bot-api": "*"
+  }
+}
