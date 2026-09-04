@@ -1,7 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v3: красивый парсер — название, цены, скидка, "купили",
-//     короткая реф-ссылка без мусора
+// v4: обход защиты — парсим МОБИЛЬНУЮ версию m.aliexpress.ru
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -21,7 +20,7 @@ async function sb(path, opts = {}) {
             apikey: SUPABASE_KEY,
             Authorization: "Bearer " + SUPABASE_KEY,
             "Content-Type": "application/json",
-            Prefer: "return=representation"
+            Prefer: opts.prefer || "return=representation"
         },
         body: opts.body ? JSON.stringify(opts.body) : undefined
     });
@@ -30,8 +29,12 @@ async function sb(path, opts = {}) {
 }
 
 async function saveProduct(p) {
-    try { await sb("products", { method: "POST", body: p }); }
-    catch (e) { console.log("⚠️ Запись БД: " + e.message); }
+    try {
+        await sb("products?on_conflict=source,external_id", {
+            method: "POST", body: p,
+            prefer: "return=representation,resolution=merge-duplicates"
+        });
+    } catch (e) { console.log("⚠️ Запись БД: " + e.message); }
 }
 
 // ── ЧТЕНИЕ ТЕКСТА СООБЩЕНИЯ ──────────────────────────────
@@ -48,8 +51,7 @@ function grab(html, re) { const m = html.match(re); return m ? m[1] : ""; }
 function decode(s) {
     return String(s || "")
         .replace(/&quot;/g, '"').replace(/&amp;/g, "&")
-        .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-        .replace(/\\u[\dA-Fa-f]{4}/g, "");
+        .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 function metaContent(html, prop) {
     const tag = html.match(new RegExp('<meta[^>]*property=["\']' + prop + '["\'][^>]*>', "i"))
@@ -62,11 +64,13 @@ function fmtPrice(n) {
     return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 }
 
-// ── ПАРСЕР ТОВАРА (v3 — по реальной странице) ────────────
+// ── ПАРСЕР v4: МОБИЛЬНАЯ ВЕРСИЯ СТРАНИЦЫ ─────────────────
 async function fetchProduct(url) {
-    const res = await fetch(url, {
+    const id = (url.match(/item\/(\d+)/) || [])[1];
+    const target = id ? `https://m.aliexpress.ru/item/${id}.html` : url;
+    const res = await fetch(target, {
         headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9"
         }
     });
@@ -74,7 +78,7 @@ async function fetchProduct(url) {
     const html = await res.text();
     const p = { title: "", image: "", price: "", oldPrice: "", discount: "", sold: "", rating: "" };
 
-    // НАЗВАНИЕ: H1 → og:title → <title>
+    // НАЗВАНИЕ
     const h1 = grab(html, /<h1[^>]*>([\s\S]*?)<\/h1>/i);
     if (h1) p.title = decode(h1.replace(/<[^>]+>/g, "").trim());
     if (!p.title) p.title = metaContent(html, "og:title");
@@ -86,13 +90,13 @@ async function fetchProduct(url) {
     // ФОТО
     p.image = metaContent(html, "og:image");
 
-    // ЦЕНЫ из JSON-блоков (надёжнее всего)
+    // ЦЕНЫ из JSON
     p.price = grab(html, /"salePrice"\s*:\s*"?([\d.,]+)"?/)
         || grab(html, /"activityPrice"\s*:\s*"?([\d.,]+)"?/)
         || grab(html, /"displayPrice"\s*:\s*"?([\d.,]+)"?/);
     p.oldPrice = grab(html, /"originalPrice"\s*:\s*"?([\d.,]+)"?/);
 
-    // Запасной вариант цен: первые две "N ₽" на странице
+    // ЦЕНЫ из текста: первые две "N ₽"
     if (!p.price) {
         const nums = [...html.matchAll(/([\d][\d\s\u00A0]{1,9})\s*₽/g)]
             .map(m => m[1].replace(/[\s\u00A0]/g, ""))
@@ -101,22 +105,17 @@ async function fetchProduct(url) {
         if (nums[1] && Number(nums[1]) > Number(nums[0])) p.oldPrice = nums[1];
     }
 
-    // СКИДКА
+    // СКИДКА, КУПИЛИ, РЕЙТИНГ
     p.discount = grab(html, /[-−](\d{1,2})\s*%/) || "";
-
-    // КУПИЛИ
     p.sold = grab(html, /([\d][\d\s\u00A0]*)\s*купили/).trim();
-
-    // РЕЙТИНГ
     p.rating = grab(html, /"averageStar"\s*:\s*"([\d.]+)"/)
-        || grab(html, /"evarageStar"\s*:\s*"([\d.]+)"/)
-        || grab(html, /"averageRating"\s*:\s*"([\d.]+)"/);
+        || grab(html, /"evarageStar"\s*:\s*"([\d.]+)"/);
 
-    console.log(`🔎 v3: ${p.title} | ${p.price}→${p.oldPrice} | −${p.discount}% | купили:${p.sold} | фото:${p.image ? "есть" : "нет"}`);
+    console.log(`🔎 v4: ${p.title} | ${p.price}→${p.oldPrice} | −${p.discount}% | купили:${p.sold} | фото:${p.image ? "есть" : "нет"}`);
     return p;
 }
 
-// ── КОРОТКАЯ РЕФ-ССЫЛКА (без мусора) ─────────────────────
+// ── КОРОТКАЯ РЕФ-ССЫЛКА ──────────────────────────────────
 function makeRefLink(productUrl) {
     const id = (productUrl.match(/item\/(\d+)/) || [])[1];
     if (id) return `https://aliexpress.ru/item/${id}.html?aff_short_key=${AFF_KEY}`;
@@ -127,7 +126,7 @@ function makeRefLink(productUrl) {
     } catch (e) { return productUrl; }
 }
 
-// ── КАРТОЧКА v3 ──────────────────────────────────────────
+// ── КАРТОЧКА ─────────────────────────────────────────────
 function buildCard(p, ref) {
     const lines = ["👀 Сосед нашёл!", ""];
     lines.push("🏷️ " + (p.title || "Товар с AliExpress"));
@@ -171,10 +170,10 @@ bot.hears(/.*/, async (ctx) => {
     const isChannel = String(info.type).includes("channel");
     if (!uid || isChannel) return;
 
-    // РЕЖИМ 1: ссылка на товар → красивая карточка
+    // ССЫЛКА НА ТОВАР → КАРТОЧКА
     const link = text.match(/https?:\/\/[^\s]+/);
     if (link && /aliexpress\.ru/i.test(link[0])) {
-        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, делаю красивую карточку…");
+        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, делаю карточку…");
         try {
             const p = await fetchProduct(link[0]);
             const ref = makeRefLink(link[0]);
@@ -191,14 +190,14 @@ bot.hears(/.*/, async (ctx) => {
                 category: "manual", status: "posted",
                 posted_at: new Date().toISOString()
             });
-            await bot.api.sendMessageToUser(uid, ok ? "✅ Готово! Красивая карточка в канале." : "❌ В канал не выложил — проверь CHANNEL_ID.");
+            await bot.api.sendMessageToUser(uid, ok ? "✅ Готово! Карточка в канале." : "❌ В канал не выложил — проверь CHANNEL_ID.");
         } catch (e) {
             await bot.api.sendMessageToUser(uid, "⚠️ Не смог прочитать товар: " + e.message);
         }
         return;
     }
 
-    // РЕЖИМ 2: "тест"
+    // "тест"
     if (text.trim().toLowerCase() === "тест") {
         const ok = await postToChannel([
             "👀 Сосед нашёл!", "",
@@ -230,5 +229,5 @@ process.on("unhandledRejection", (err) => {
     }
 });
 
-console.log("🚀 «Сосед нашёл!» v3 (красивый парсер) запускается…");
+console.log("🚀 «Сосед нашёл!» v4 (мобильный парсер) запускается…");
 bot.start();
