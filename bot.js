@@ -1,11 +1,10 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v2: умный помощник — кинь ссылку на товар в личку,
-//     бот сам сделает карточку и выложит в канал
+// v3: красивый парсер — название, цены, скидка, "купили",
+//     короткая реф-ссылка без мусора
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
-// ── НАСТРОЙКИ (из переменных Render) ─────────────────────
 const TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID ? Number(process.env.CHANNEL_ID) : null;
 const AFF_KEY = process.env.AFF_KEY || "_9zpFKc";
@@ -44,64 +43,100 @@ function getText(ctx) {
     return "";
 }
 
-// ── ИЗВЛЕЧЕНИЕ ДАННЫХ ТОВАРА СО СТРАНИЦЫ ─────────────────
+// ── ВСПОМОГАТЕЛЬНЫЕ ──────────────────────────────────────
 function grab(html, re) { const m = html.match(re); return m ? m[1] : ""; }
 function decode(s) {
     return String(s || "")
         .replace(/&quot;/g, '"').replace(/&amp;/g, "&")
-        .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+        .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+        .replace(/\\u[\dA-Fa-f]{4}/g, "");
+}
+function metaContent(html, prop) {
+    const tag = html.match(new RegExp('<meta[^>]*property=["\']' + prop + '["\'][^>]*>', "i"))
+        || html.match(new RegExp('<meta[^>]*name=["\']' + prop + '["\'][^>]*>', "i"));
+    if (!tag) return "";
+    const c = tag[0].match(/content=["']([^"']*)["']/);
+    return c ? decode(c[1]) : "";
+}
+function fmtPrice(n) {
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 }
 
+// ── ПАРСЕР ТОВАРА (v3 — по реальной странице) ────────────
 async function fetchProduct(url) {
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } });
+    const res = await fetch(url, {
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9"
+        }
+    });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const html = await res.text();
-    const p = { title: "", image: "", price: "", oldPrice: "", discount: "" };
+    const p = { title: "", image: "", price: "", oldPrice: "", discount: "", sold: "", rating: "" };
 
-    // 1) Ищем JSON-LD (Product) — там чистые данные
-    const ldBlocks = [...html.matchAll(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
-    for (const m of ldBlocks) {
-        try {
-            const obj = JSON.parse(m[1]);
-            const list = Array.isArray(obj) ? obj : (obj["@graph"] || [obj]);
-            for (const o of list) {
-                if (String(o["@type"] || "").includes("Product")) {
-                    p.title = p.title || o.name || "";
-                    p.image = p.image || (Array.isArray(o.image) ? o.image[0] : o.image) || "";
-                    const off = o.offers || {};
-                    p.price = p.price || off.price || off.lowPrice || "";
-                }
-            }
-        } catch (e) {}
+    // НАЗВАНИЕ: H1 → og:title → <title>
+    const h1 = grab(html, /<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    if (h1) p.title = decode(h1.replace(/<[^>]+>/g, "").trim());
+    if (!p.title) p.title = metaContent(html, "og:title");
+    if (!p.title) {
+        const t = grab(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
+        p.title = decode(t).split(/—|–|\|/)[0].replace(/купить.*/i, "").trim();
     }
 
-    // 2) Запасной вариант — og-метатеги
-    if (!p.title) p.title = decode(grab(html, /<meta[^>]+property="og:title"[^>]+content="([^"]*)"/));
-    if (!p.image) p.image = grab(html, /<meta[^>]+property="og:image"[^>]+content="([^"]*)"/);
-    if (!p.price) p.price = grab(html, /"displayPrice"\s*:\s*"([^"]+)"/) || grab(html, /"formattedPrice"\s*:\s*"([^"]+)"/);
-    if (!p.oldPrice) p.oldPrice = grab(html, /"originalPrice"\s*:\s*"?([\d\s.,]+)"?/);
-    if (!p.discount) p.discount = grab(html, /"discountPercentage"\s*:\s*"?(\d+)"?/) || grab(html, /−(\d+)\s*%/);
+    // ФОТО
+    p.image = metaContent(html, "og:image");
 
-    p.title = decode(p.title);
-    console.log(`🔎 Спарсил: ${p.title} | цена: ${p.price} | скидка: ${p.discount} | фото: ${p.image ? "есть" : "нет"}`);
+    // ЦЕНЫ из JSON-блоков (надёжнее всего)
+    p.price = grab(html, /"salePrice"\s*:\s*"?([\d.,]+)"?/)
+        || grab(html, /"activityPrice"\s*:\s*"?([\d.,]+)"?/)
+        || grab(html, /"displayPrice"\s*:\s*"?([\d.,]+)"?/);
+    p.oldPrice = grab(html, /"originalPrice"\s*:\s*"?([\d.,]+)"?/);
+
+    // Запасной вариант цен: первые две "N ₽" на странице
+    if (!p.price) {
+        const nums = [...html.matchAll(/([\d][\d\s\u00A0]{1,9})\s*₽/g)]
+            .map(m => m[1].replace(/[\s\u00A0]/g, ""))
+            .filter(v => /^\d{2,7}$/.test(v));
+        if (nums[0]) p.price = nums[0];
+        if (nums[1] && Number(nums[1]) > Number(nums[0])) p.oldPrice = nums[1];
+    }
+
+    // СКИДКА
+    p.discount = grab(html, /[-−](\d{1,2})\s*%/) || "";
+
+    // КУПИЛИ
+    p.sold = grab(html, /([\d][\d\s\u00A0]*)\s*купили/).trim();
+
+    // РЕЙТИНГ
+    p.rating = grab(html, /"averageStar"\s*:\s*"([\d.]+)"/)
+        || grab(html, /"evarageStar"\s*:\s*"([\d.]+)"/)
+        || grab(html, /"averageRating"\s*:\s*"([\d.]+)"/);
+
+    console.log(`🔎 v3: ${p.title} | ${p.price}→${p.oldPrice} | −${p.discount}% | купили:${p.sold} | фото:${p.image ? "есть" : "нет"}`);
     return p;
 }
 
-// ── РЕФ-ССЫЛКА ИЗ ССЫЛКИ НА ТОВАР ────────────────────────
+// ── КОРОТКАЯ РЕФ-ССЫЛКА (без мусора) ─────────────────────
 function makeRefLink(productUrl) {
+    const id = (productUrl.match(/item\/(\d+)/) || [])[1];
+    if (id) return `https://aliexpress.ru/item/${id}.html?aff_short_key=${AFF_KEY}`;
     try {
         const u = new URL(productUrl);
-        u.searchParams.set("aff_short_key", AFF_KEY);
+        u.search = `?aff_short_key=${AFF_KEY}`;
         return u.toString();
     } catch (e) { return productUrl; }
 }
 
-// ── КАРТОЧКА ТОВАРА ──────────────────────────────────────
+// ── КАРТОЧКА v3 ──────────────────────────────────────────
 function buildCard(p, ref) {
     const lines = ["👀 Сосед нашёл!", ""];
     lines.push("🏷️ " + (p.title || "Товар с AliExpress"));
+    const extra = [];
+    if (p.rating) extra.push("⭐ " + p.rating.replace(".", ","));
+    if (p.sold) extra.push("🛒 купили: " + p.sold);
+    if (extra.length) lines.push(extra.join(" | "));
     if (p.price) {
-        let line = "💰 " + (p.oldPrice ? `Было ${p.oldPrice} ₽ → стало ` : "") + p.price + " ₽";
+        let line = "💰 " + (p.oldPrice ? `Было ${fmtPrice(p.oldPrice)} ₽ → стало ` : "") + fmtPrice(p.price) + " ₽";
         if (p.discount) line += ` (−${p.discount}%)`;
         lines.push(line);
     }
@@ -122,7 +157,6 @@ async function postToChannel(text) {
     }
 }
 
-// ── РЕГИСТРАТОР ЧАТОВ ────────────────────────────────────
 function chatInfo(ctx) {
     const c = ctx.chat || ctx.message?.chat || ctx.message?.recipient || {};
     return { id: c.chat_id ?? c.id ?? null, type: c.chat_type ?? c.type ?? "?" };
@@ -137,17 +171,17 @@ bot.hears(/.*/, async (ctx) => {
     const isChannel = String(info.type).includes("channel");
     if (!uid || isChannel) return;
 
-    // РЕЖИМ 1: кидаешь ссылку на товар — бот делает карточку сам
+    // РЕЖИМ 1: ссылка на товар → красивая карточка
     const link = text.match(/https?:\/\/[^\s]+/);
     if (link && /aliexpress\.ru/i.test(link[0])) {
-        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, делаю карточку…");
+        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, делаю красивую карточку…");
         try {
             const p = await fetchProduct(link[0]);
             const ref = makeRefLink(link[0]);
             const ok = await postToChannel(buildCard(p, ref));
-            const extId = (link[0].match(/item\/(\d+)/) || [])[1] || link[0];
             await saveProduct({
-                source: "aliexpress", external_id: extId,
+                source: "aliexpress",
+                external_id: (link[0].match(/item\/(\d+)/) || [])[1] || link[0],
                 title: p.title || link[0],
                 price_new: parseInt(String(p.price).replace(/\D/g, "")) || null,
                 price_old: parseInt(String(p.oldPrice).replace(/\D/g, "")) || null,
@@ -157,22 +191,20 @@ bot.hears(/.*/, async (ctx) => {
                 category: "manual", status: "posted",
                 posted_at: new Date().toISOString()
             });
-            await bot.api.sendMessageToUser(uid, ok
-                ? "✅ Готово! Карточка в канале (фото подтянется превью к ссылке)."
-                : "❌ Карточка собрана, но в канал не выложил — проверь CHANNEL_ID.");
+            await bot.api.sendMessageToUser(uid, ok ? "✅ Готово! Красивая карточка в канале." : "❌ В канал не выложил — проверь CHANNEL_ID.");
         } catch (e) {
             await bot.api.sendMessageToUser(uid, "⚠️ Не смог прочитать товар: " + e.message);
         }
         return;
     }
 
-    // РЕЖИМ 2: слово "тест" — пробная карточка
+    // РЕЖИМ 2: "тест"
     if (text.trim().toLowerCase() === "тест") {
         const ok = await postToChannel([
             "👀 Сосед нашёл!", "",
             "🏷️ Набор из 10 бесшовных заколок для волос",
-            "💰 Было 309 ₽ → стало 99 ₽ (−68%)",
-            "🔥 Купили: 50 451 человек", "",
+            "🛒 купили: 50 451",
+            "💰 Было 309 ₽ → стало 99 ₽ (−68%)", "",
             "👉 Забрать со скидкой:",
             "https://aliexpress.ru/one-price?acnt=103863733&aff_short_key=" + AFF_KEY
         ].join("\n"));
@@ -180,7 +212,7 @@ bot.hears(/.*/, async (ctx) => {
     }
 });
 
-// ── ВЕБ-СЕРВЕР (чтобы Render не усыплял) ─────────────────
+// ── ВЕБ-СЕРВЕР ───────────────────────────────────────────
 const http = await import("node:http");
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -188,7 +220,7 @@ http.createServer((req, res) => {
     res.end("Сосед нашёл! работает ✅");
 }).listen(port, () => console.log("🌐 Веб-сервер на порту " + port));
 
-// ── АВТОПЕРЕЗАПУСК ПРИ СБОЯХ ─────────────────────────────
+// ── АВТОПЕРЕЗАПУСК ───────────────────────────────────────
 process.on("unhandledRejection", (err) => {
     const msg = String(err?.message ?? err) + " " + String(err?.cause?.message ?? "");
     console.error("⚠️ Ошибка: " + msg);
@@ -198,5 +230,5 @@ process.on("unhandledRejection", (err) => {
     }
 });
 
-console.log("🚀 «Сосед нашёл!» v2 (умный помощник) запускается…");
+console.log("🚀 «Сосед нашёл!» v3 (красивый парсер) запускается…");
 bot.start();
