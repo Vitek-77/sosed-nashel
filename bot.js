@@ -1,13 +1,14 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v1.1: исправлен приём текста сообщений
+// v2: умный помощник — кинь ссылку на товар в личку,
+//     бот сам сделает карточку и выложит в канал
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
 // ── НАСТРОЙКИ (из переменных Render) ─────────────────────
 const TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID ? Number(process.env.CHANNEL_ID) : null;
-const REF_LINK = process.env.REF_LINK || "https://aliexpress.ru/one-price?acnt=103863733&src=yandex&aff_short_key=_9zpFKc&aff_platform=true";
+const AFF_KEY = process.env.AFF_KEY || "_9zpFKc";
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
 
@@ -29,30 +30,83 @@ async function sb(path, opts = {}) {
     return res.json();
 }
 
-async function isPosted(extId) {
-    try {
-        const r = await sb("products?external_id=eq." + encodeURIComponent(extId) + "&select=id");
-        return Array.isArray(r) && r.length > 0;
-    } catch (e) { console.log("⚠️ Чтение БД: " + e.message); return false; }
-}
-
 async function saveProduct(p) {
     try { await sb("products", { method: "POST", body: p }); }
     catch (e) { console.log("⚠️ Запись БД: " + e.message); }
 }
 
-async function logPost(productId) {
-    try { await sb("post_log", { method: "POST", body: { product_id: productId, channel: "moscow_mo" } }); }
-    catch (e) { console.log("⚠️ Лог БД: " + e.message); }
-}
-
-// ── ЧТЕНИЕ ТЕКСТА (ищем во всех местах) ──────────────────
+// ── ЧТЕНИЕ ТЕКСТА СООБЩЕНИЯ ──────────────────────────────
 function getText(ctx) {
     if (ctx.text && typeof ctx.text === "string") return ctx.text;
     if (ctx.message?.text && typeof ctx.message.text === "string") return ctx.message.text;
     if (ctx.message?.body?.text && typeof ctx.message.body.text === "string") return ctx.message.body.text;
     if (ctx.body?.text && typeof ctx.body.text === "string") return ctx.body.text;
     return "";
+}
+
+// ── ИЗВЛЕЧЕНИЕ ДАННЫХ ТОВАРА СО СТРАНИЦЫ ─────────────────
+function grab(html, re) { const m = html.match(re); return m ? m[1] : ""; }
+function decode(s) {
+    return String(s || "")
+        .replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+        .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+async function fetchProduct(url) {
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const html = await res.text();
+    const p = { title: "", image: "", price: "", oldPrice: "", discount: "" };
+
+    // 1) Ищем JSON-LD (Product) — там чистые данные
+    const ldBlocks = [...html.matchAll(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+    for (const m of ldBlocks) {
+        try {
+            const obj = JSON.parse(m[1]);
+            const list = Array.isArray(obj) ? obj : (obj["@graph"] || [obj]);
+            for (const o of list) {
+                if (String(o["@type"] || "").includes("Product")) {
+                    p.title = p.title || o.name || "";
+                    p.image = p.image || (Array.isArray(o.image) ? o.image[0] : o.image) || "";
+                    const off = o.offers || {};
+                    p.price = p.price || off.price || off.lowPrice || "";
+                }
+            }
+        } catch (e) {}
+    }
+
+    // 2) Запасной вариант — og-метатеги
+    if (!p.title) p.title = decode(grab(html, /<meta[^>]+property="og:title"[^>]+content="([^"]*)"/));
+    if (!p.image) p.image = grab(html, /<meta[^>]+property="og:image"[^>]+content="([^"]*)"/);
+    if (!p.price) p.price = grab(html, /"displayPrice"\s*:\s*"([^"]+)"/) || grab(html, /"formattedPrice"\s*:\s*"([^"]+)"/);
+    if (!p.oldPrice) p.oldPrice = grab(html, /"originalPrice"\s*:\s*"?([\d\s.,]+)"?/);
+    if (!p.discount) p.discount = grab(html, /"discountPercentage"\s*:\s*"?(\d+)"?/) || grab(html, /−(\d+)\s*%/);
+
+    p.title = decode(p.title);
+    console.log(`🔎 Спарсил: ${p.title} | цена: ${p.price} | скидка: ${p.discount} | фото: ${p.image ? "есть" : "нет"}`);
+    return p;
+}
+
+// ── РЕФ-ССЫЛКА ИЗ ССЫЛКИ НА ТОВАР ────────────────────────
+function makeRefLink(productUrl) {
+    try {
+        const u = new URL(productUrl);
+        u.searchParams.set("aff_short_key", AFF_KEY);
+        return u.toString();
+    } catch (e) { return productUrl; }
+}
+
+// ── КАРТОЧКА ТОВАРА ──────────────────────────────────────
+function buildCard(p, ref) {
+    const lines = ["👀 Сосед нашёл!", ""];
+    lines.push("🏷️ " + (p.title || "Товар с AliExpress"));
+    if (p.price) {
+        let line = "💰 " + (p.oldPrice ? `Было ${p.oldPrice} ₽ → стало ` : "") + p.price + " ₽";
+        if (p.discount) line += ` (−${p.discount}%)`;
+        lines.push(line);
+    }
+    lines.push("", "👉 Забрать со скидкой:", ref);
+    return lines.join("\n");
 }
 
 // ── ОТПРАВКА В КАНАЛ ─────────────────────────────────────
@@ -68,21 +122,7 @@ async function postToChannel(text) {
     }
 }
 
-// ── КАРТОЧКА ТОВАРА ──────────────────────────────────────
-function buildCard(t) {
-    return [
-        "👀 Сосед нашёл!",
-        "",
-        `🏷️ ${t.title}`,
-        `💰 Было ${t.old} ₽ → стало ${t.now} ₽ (−${t.disc}%)`,
-        `🔥 Купили: ${t.sold} человек`,
-        "",
-        "👉 Забрать со скидкой:",
-        REF_LINK
-    ].join("\n");
-}
-
-// ── РЕГИСТРАТОР: пишет в логи ID всех чатов ──────────────
+// ── РЕГИСТРАТОР ЧАТОВ ────────────────────────────────────
 function chatInfo(ctx) {
     const c = ctx.chat || ctx.message?.chat || ctx.message?.recipient || {};
     return { id: c.chat_id ?? c.id ?? null, type: c.chat_type ?? c.type ?? "?" };
@@ -94,15 +134,49 @@ bot.hears(/.*/, async (ctx) => {
     const text = getText(ctx);
     console.log(`💬 Чат: ${info.id} (${info.type}) | Юзер: ${uid} | Текст: ${text}`);
 
-    // ТЕСТ: напиши боту в личку слово "тест" — он выложит пробную карточку
-    if (uid && !String(info.type).includes("channel") && String(text).trim().toLowerCase() === "тест") {
-        const ok = await postToChannel(buildCard({
-            title: "Набор из 10 бесшовных заколок для волос",
-            old: 309, now: 99, disc: 68, sold: "50 451"
-        }));
-        await bot.api.sendMessageToUser(uid, ok
-            ? "✅ Тестовый пост опубликован в канале!"
-            : "❌ Не вышло. Проверь CHANNEL_ID в Render.");
+    const isChannel = String(info.type).includes("channel");
+    if (!uid || isChannel) return;
+
+    // РЕЖИМ 1: кидаешь ссылку на товар — бот делает карточку сам
+    const link = text.match(/https?:\/\/[^\s]+/);
+    if (link && /aliexpress\.ru/i.test(link[0])) {
+        await bot.api.sendMessageToUser(uid, "⏳ Принял ссылку, делаю карточку…");
+        try {
+            const p = await fetchProduct(link[0]);
+            const ref = makeRefLink(link[0]);
+            const ok = await postToChannel(buildCard(p, ref));
+            const extId = (link[0].match(/item\/(\d+)/) || [])[1] || link[0];
+            await saveProduct({
+                source: "aliexpress", external_id: extId,
+                title: p.title || link[0],
+                price_new: parseInt(String(p.price).replace(/\D/g, "")) || null,
+                price_old: parseInt(String(p.oldPrice).replace(/\D/g, "")) || null,
+                discount_percent: parseInt(p.discount) || null,
+                image_url: p.image || null,
+                original_url: link[0], ref_url: ref,
+                category: "manual", status: "posted",
+                posted_at: new Date().toISOString()
+            });
+            await bot.api.sendMessageToUser(uid, ok
+                ? "✅ Готово! Карточка в канале (фото подтянется превью к ссылке)."
+                : "❌ Карточка собрана, но в канал не выложил — проверь CHANNEL_ID.");
+        } catch (e) {
+            await bot.api.sendMessageToUser(uid, "⚠️ Не смог прочитать товар: " + e.message);
+        }
+        return;
+    }
+
+    // РЕЖИМ 2: слово "тест" — пробная карточка
+    if (text.trim().toLowerCase() === "тест") {
+        const ok = await postToChannel([
+            "👀 Сосед нашёл!", "",
+            "🏷️ Набор из 10 бесшовных заколок для волос",
+            "💰 Было 309 ₽ → стало 99 ₽ (−68%)",
+            "🔥 Купили: 50 451 человек", "",
+            "👉 Забрать со скидкой:",
+            "https://aliexpress.ru/one-price?acnt=103863733&aff_short_key=" + AFF_KEY
+        ].join("\n"));
+        await bot.api.sendMessageToUser(uid, ok ? "✅ Тестовый пост в канале!" : "❌ Не вышло. Проверь CHANNEL_ID.");
     }
 });
 
@@ -124,6 +198,5 @@ process.on("unhandledRejection", (err) => {
     }
 });
 
-console.log("🚀 «Сосед нашёл!» (Москва и МО) запускается…");
+console.log("🚀 «Сосед нашёл!» v2 (умный помощник) запускается…");
 bot.start();
-
