@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v11: серьёзный смайл, 2 переводчика, кнопка вместо длинной ссылки
+// v12: ссылка ВСЕГДА в посте + перевод цепочкой из 3 сервисов
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -18,12 +18,12 @@ const ADM_FEED = process.env.ADMITAD_FEED_URL || "";
 const ADVERTISER = process.env.ADVERTISER_NAME || "ООО «Алиэкспресс (РУ)», ИНН 7703380158";
 const USD_RATE = Number(process.env.USD_RATE || 95);
 
-// ⛔ НЕ АФФ магазины (верх списка Admitad) — для ссылок на магазины
-const NON_AFF = new Set(("1103489061,1104030822,1104037812,3010045,2800188,1104981079,911355049,1104031803,5070109,1104977094,911842395,1104977191,4776002,1103191382,1980682,1103472625,1104206902,911207215,2684007,1105175794,1104904457,1102210530,1105180541,608229,411294,1105131001,1577002,1105184508,1105226069,1105378045,1100115010,1104527004,1103330495,911755149,911058180,1102191945,1104631533,1105003602,910358408,1103203642,1105324765,204419,405501,1103864887,911812026,1105348580,1102092452,2939001,1104474060,911705531,5204010,1104160567,808990,1105223248,1367236,3889024,911971085,1104704612,5250176,2539007,5098062,4555045,1103657098,1105145263,1102634703,1971225,1103156072,2415022,4669071,1105185626,1719259,1105215075,912151410,1951301,1105092455,1105175729,1086484,4664082,1103370334,1104931660,1104554261,2983032,3988037,5796744,1102989116,912618659,815336,2135107,2287083,5146085,4586015,1103187789,911055219,1104889053,5880442,1472219,1103337287,5791687,1104931478,1102305001,1102196689,5244086,912432424,4392085,609719,1100324072,1104094069,1103474448,1104802041,1103266478,805486,2828069,811228,1103276470,1105216738,1104067514,1102425440,911833474,1159132,1105181620,1104111857,1103474448,1104802041,734047,912067676,4383081,5374134,911944912,1102056225,1953865,4847079,4998286,1971296,1103614199,4067001,1105250239,900246095,605052,1102597618,1103554327,1104781423,2227131,1105280985,1020605,4921004,1103812459,3097060,932490,219072,1103886793,911735070,3251001,5034021,1105134507,1102291325,1103739106,830007,4658150,5161049,912170163,1487249,4743011,510887,911820138,911683032,1104913427,2393002,3193060,5628349,912564544,1103797110,4376032,1034164,1105209551,1105381909,2744003,1105185563,5077386,1105437829,5437112,3093007,911797189,1779070,3660007,5798857,803871,1103335351,2934031,912151058,1105074345,1105244708,1104399110,1086609,1945231,912115092,5214003").split(","));
+// ⛔ НЕ АФФ магазины (верх списка из таблицы Admitad)
+const NON_AFF = new Set(("1103489061,1104030822,1104037812,3010045,2800188,1104981079,911355049,1104031803,5070109,1104977094,911842395,1104977191,4776002,1103191382,1980682,1103472625,1104206902,911207215,2684007,1105175794,1104904457,1102210530,1105180541,608229,411294,1105131001,1577002,1105184508,1105226069,1105378045,1100115010,1104527004,1103330495,911755149,911058180,1102191945,1104631533,1105003602,910358408,1103203642,1105324765,204419,405501,1103864887,911812026,1105348580,1102092452,2939001,1104474060,911705531,5204010,1104160567,808990,1105223248,1367236,3889024,911971085,1104704612,5250176,2539007,5098062,4555045,1103657098,1105145263,1102634703,1971225,1103156072,2415022,4669071,1105185626,1719259,1105215075,912151410,1951301,1105092455,1105175729,1086484,4664082,1103370334,1104931660,1104554261,2983032,3988037,5796744,1102989116,912618659,815336,2135107,2287083,5146085,4586015,1103187789,911055219,1104889053,5880442,1472219,1103337287,5791687,1104931478,1102305001,1102196689,5244086,912432424,4392085,609719,1100324072,1104094069,1103474448,1104802041,734047,910341212,1104338277,5208015,1105057251,1104074752,1103266478,805486,2828069,811228,1103276470,1105216738,1104067514,1102425440,911833474,1159132,1105181620,1104111857,1103474448,1104802041,912067676,4383081,5374134,911944912,1102056225,1953865,4847079,4998286,1971296,1103614199,4067001,1105250239,900246095,605052,1102597618,1103554327,1104781423,2227131,1105280985,1020605,4921004,1103812459,3097060,932490,219072,1103886793,911735070,3251001,5034021,1105134507,1102291325,1103739106,830007,4658150,5161049,912170163,1487249,4743011,510887,911820138,911683032,1104913427,2393002,3193060,5628349,912564544,1103797110,4376032,1034164,1105209551,1105381909,2744003,1105185563,5077386,1105437829,5437112,3093007,911797189,1779070,3660007,5798857,803871,1103335351,2934031,912151058,1105074345,1105244708,1104399110,1086609,1945231,912115092,5214003").split(","));
 
 const bot = new Bot(TOKEN);
 
-// ── ПАМЯТЬ/МАРКИРОВКА ────────────────────────────────────
+// ── ПАМЯТЬ ───────────────────────────────────────────────
 async function sb(path, opts = {}) {
     const res = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
         method: opts.method || "GET",
@@ -37,11 +37,11 @@ async function saveProduct(p) {
     try { await sb("products?on_conflict=source,external_id", { method: "POST", body: p, prefer: "return=representation,resolution=merge-duplicates" }); }
     catch (e) { console.log("⚠️ БД: " + e.message); }
 }
-function eridOf(link) { const m = String(link).match(/erid=([A-Za-z0-9_]+)/i); return m ? m[1] : ""; }
-function markFooter(ref) { const e = eridOf(ref); return "\nРеклама. " + ADVERTISER + (e ? ", erid: " + e : ""); }
 function fmt(n) { return String(Math.round(Number(n))).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
+function eridOf(link) { const m = String(link).match(/erid=([A-Za-z0-9_]+)/i); return m ? m[1] : ""; }
+function markLine(ref) { const e = eridOf(ref); return "Реклама. " + ADVERTISER + (e ? ", erid: " + e : ""); }
 
-// ── ПЕРЕВОД (Google + MyMemory) ──────────────────────────
+// ── ПЕРЕВОД: 3 сервиса по цепочке ───────────────────────
 async function translateName(s) {
     if (!/[A-Za-z]{3,}/.test(s)) return s;
     const q = s.slice(0, 450);
@@ -52,13 +52,27 @@ async function translateName(s) {
             const t = Array.isArray(j) && Array.isArray(j[0]) ? j[0].map(x => (x && x[0]) || "").join("") : "";
             if (t && /[\u0400-\u04FF]/.test(t)) { console.log("🈶 Перевод: Google"); return t; }
         }
-    } catch (e) { console.log("⚠️ Google translate: " + e.message); }
+        console.log("⚠️ Google перевод: статус " + res.status);
+    } catch (e) { console.log("⚠️ Google перевод: " + e.message); }
     try {
         const res = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(q) + "&langpair=en|ru");
-        const j = await res.json();
-        const t = j?.responseData?.translatedText;
-        if (t && /[\u0400-\u04FF]/.test(t)) { console.log("🈶 Перевод: MyMemory"); return t; }
+        if (res.ok) {
+            const j = await res.json();
+            const t = j?.responseData?.translatedText;
+            if (t && /[\u0400-\u04FF]/.test(t)) { console.log("🈶 Перевод: MyMemory"); return t; }
+        }
+        console.log("⚠️ MyMemory: статус " + res.status);
     } catch (e) { console.log("⚠️ MyMemory: " + e.message); }
+    try {
+        const res = await fetch("https://lingva.ml/api/v1/en/ru/" + encodeURIComponent(q));
+        if (res.ok) {
+            const j = await res.json();
+            const t = j?.translation;
+            if (t && /[\u0400-\u04FF]/.test(t)) { console.log("🈶 Перевод: Lingva"); return t; }
+        }
+        console.log("⚠️ Lingva: статус " + res.status);
+    } catch (e) { console.log("⚠️ Lingva: " + e.message); }
+    console.log("⚠️ Перевод не удался — оставляю английский");
     return s;
 }
 
@@ -150,7 +164,7 @@ async function fillPool(want = 150) {
     console.log(`📦 Пул: ${POOL.length} (просмотрено ${seen}, ${(bytes / 1048576).toFixed(1)} МБ)`);
 }
 
-// ── ПУБЛИКАЦИЯ (фото + кнопка, с запасным вариантом) ─────
+// ── ПОСТ: фото + текст + ССЫЛКА ВСЕГДА + маркировка ─────
 async function uploadPhoto(imgUrl) {
     const res = await fetch(imgUrl);
     if (!res.ok) throw new Error("фото HTTP " + res.status);
@@ -164,29 +178,11 @@ async function uploadPhoto(imgUrl) {
 async function publish(bodyText, ref, imgUrl) {
     let attach = null;
     if (imgUrl) { try { attach = await uploadPhoto(imgUrl); } catch (e) { console.log("⚠️ Фото: " + e.message); } }
-    const withLink = "\n\n👉 Забрать со скидкой:\n" + ref;
-    try {
-        const opts = { inline_keyboard: [[{ type: "url", text: "🛒 Забрать со скидкой", url: ref }]] };
-        if (attach) opts.attachments = [attach];
-        await bot.api.sendMessageToChat(CHANNEL_ID, bodyText, opts);
-        console.log("📢 Пост с КНОПКОЙ");
-        return true;
-    } catch (e) {
-        console.log("⚠️ Кнопка не прошла (" + e.message + ") → ссылка текстом");
-        const opts2 = attach ? { attachments: [attach] } : undefined;
-        await bot.api.sendMessageToChat(CHANNEL_ID, bodyText + withLink, opts2);
-        return true;
-    }
-}
-
-// ── КАРТОЧКА ─────────────────────────────────────────────
-function productCard(o, ref) {
-    const p = Math.round(o.price * USD_RATE), op = Math.round((o.old || 0) * USD_RATE);
-    const L = ["📌 Сосед нашёл!", "", "🏷️ " + o.name];
-    if (p > 0) L.push("💰 " + (op > p ? `Было ${fmt(op)} ₽ → стало ` : "") + `около ${fmt(p)} ₽`);
-    if (o.discount) L.push("💥 Скидка −" + o.discount + "%");
-    L.push("", markFooter(ref).trim());
-    return L.join("\n");
+    const full = bodyText + "\n\n👉 Забрать со скидкой:\n" + ref + "\n\n" + markLine(ref);
+    const opts = attach ? { attachments: [attach] } : undefined;
+    await bot.api.sendMessageToChat(CHANNEL_ID, full, opts);
+    console.log("📢 Пост опубликован (ссылка в тексте)");
+    return true;
 }
 
 // ── СЛУЖЕБНЫЕ ────────────────────────────────────────────
@@ -210,9 +206,9 @@ bot.hears(/.*/, async (ctx) => {
     if (!uid || String(info.type).includes("channel")) return;
     const low = text.trim().toLowerCase();
 
-    // ── ПОСТ / ПОДБОРКА = случайный товар из фида ──
-    if (low === "пост" || low === "подборка" || low === "post") {
-        await bot.api.sendMessageToUser(uid, "⏳ Ищу товар со скидкой и перевожу на русский…");
+    // ── ПОСТ = случайный товар из фида ──
+    if (low === "пост" || low === "подборка") {
+        await bot.api.sendMessageToUser(uid, "⏳ Ищу товар со скидкой, перевожу, собираю карточку…");
         try {
             if (!POOL.length) await fillPool(150);
             if (!POOL.length) { await bot.api.sendMessageToUser(uid, "😕 Пул пуст."); return; }
@@ -226,9 +222,13 @@ bot.hears(/.*/, async (ctx) => {
             const r = await makeAdmitadLink(`https://aliexpress.ru/item/${o.id}.html`);
             if (r.affiliate === false) { await bot.api.sendMessageToUser(uid, "⛔ Выпал неаффилиатный — кинь «пост» ещё раз."); return; }
             const name = String(await translateName(o.name)).slice(0, 90);
-            await publish(productCard({ ...o, name }, r.link), r.link, o.img);
-            await saveProduct({ source: "aliexpress", external_id: o.id, title: name, price_new: Math.round(o.price * USD_RATE) || null, discount_percent: o.discount, image_url: o.img, original_url: `https://aliexpress.ru/item/${o.id}.html`, ref_url: r.link, category: "auto", status: "posted", posted_at: new Date().toISOString() });
-            await bot.api.sendMessageToUser(uid, "✅ Карточка в канале!");
+            const p = Math.round(o.price * USD_RATE), op = Math.round((o.old || 0) * USD_RATE);
+            const body = ["📌 Сосед нашёл!", "", "🏷️ " + name];
+            if (p > 0) body.push("💰 " + (op > p ? `Было ${fmt(op)} ₽ → стало ` : "") + `около ${fmt(p)} ₽`);
+            if (o.discount) body.push("💥 Скидка −" + o.discount + "%");
+            await publish(body.join("\n"), r.link, o.img);
+            await saveProduct({ source: "aliexpress", external_id: o.id, title: name, price_new: p || null, discount_percent: o.discount, image_url: o.img, original_url: `https://aliexpress.ru/item/${o.id}.html`, ref_url: r.link, category: "auto", status: "posted", posted_at: new Date().toISOString() });
+            await bot.api.sendMessageToUser(uid, "✅ Карточка в канале! (пул: " + POOL.length + ")");
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ " + e.message); }
         return;
     }
@@ -241,14 +241,14 @@ bot.hears(/.*/, async (ctx) => {
             const c = coupons[0];
             const r = await makeAdmitadLink(c.url || "https://aliexpress.ru/");
             const code = c.code || c.coupon_code || "";
-            const body = ["📌 КУПОН / СКИДКА", "", "🏷️ " + String(await translateName(c.name || c.description || "Скидка в магазине AliExpress")).slice(0, 90), c.discount ? "💥 " + c.discount : "", code ? "🔑 Код: " + code : "✅ Промокод не нужен — скидка по ссылке", c.expiration_date ? "⏰ до " + String(c.expiration_date).slice(0, 10) : "", "", markFooter(r.link).trim()].filter(Boolean).join("\n");
+            const body = ["📌 КУПОН / СКИДКА", "", "🏷️ " + String(await translateName(c.name || c.description || "Скидка в магазине AliExpress")).slice(0, 90), c.discount ? "💥 " + c.discount : "", code ? "🔑 Код: " + code : "✅ Промокод не нужен — скидка по ссылке", c.expiration_date ? "⏰ до " + String(c.expiration_date).slice(0, 10) : ""].filter(Boolean).join("\n");
             await publish(body, r.link, null);
             await bot.api.sendMessageToUser(uid, "✅ Купон в канале!");
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ " + e.message); }
         return;
     }
 
-    // ── ССЫЛКА (ручной режим) ──
+    // ── ССЫЛКА вручную ──
     const link = text.match(/https?:\/\/[^\s|]+/);
     if (link && /aliexpress\.(ru|com)/i.test(link[0])) {
         const sm = link[0].match(/\/store\/(\d+)/);
@@ -259,7 +259,7 @@ bot.hears(/.*/, async (ctx) => {
         try {
             const r = await makeAdmitadLink(link[0]);
             if (r.affiliate === false) { await bot.api.sendMessageToUser(uid, "❌ Комиссия НЕ платится — не постим."); return; }
-            const body = ["📌 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : "", "", markFooter(r.link).trim()].filter(Boolean).join("\n");
+            const body = ["📌 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : ""].filter(Boolean).join("\n");
             await publish(body, r.link, null);
             await saveProduct({ source: "aliexpress", external_id: (link[0].match(/item\/(\d+)/) || [])[1] || sm?.[1] || link[0], title: parts[1], price_new: Number((parts[2] || "").replace(/\D/g, "")) || null, original_url: link[0], ref_url: r.link, category: "manual", status: "posted", posted_at: new Date().toISOString() });
             await bot.api.sendMessageToUser(uid, "✅ Пост в канале! Комиссия капает 💰");
@@ -268,7 +268,7 @@ bot.hears(/.*/, async (ctx) => {
     }
 
     if (low === "тест") {
-        await publish(["📌 Сосед нашёл!", "", "🏷️ Набор из 10 бесшовных заколок для волос", "💰 Было 309 ₽ → стало 99 ₽ (−68%)", "", "Реклама. " + ADVERTISER].join("\n"), "https://aliexpress.ru/one-price", null);
+        await publish(["📌 Сосед нашёл!", "", "🏷️ Набор из 10 бесшовных заколок для волос", "💰 Было 309 ₽ → стало 99 ₽ (−68%)"].join("\n"), "https://aliexpress.ru/one-price", null);
         await bot.api.sendMessageToUser(uid, "✅ Тест в канале!");
     }
 });
@@ -282,5 +282,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v11 (кнопка + перевод + 📌) запущен");
+console.log("🚀 «Сосед нашёл!» v12 (ссылка всегда + перевод x3) запущен");
 bot.start();
