@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v8: команды "купон" (Admitad) и "подборка" (AE Platform)
+// v8.1: + маркировка "Реклама" + erid из ссылки (ФЗ-38)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -17,6 +17,7 @@ const ADM_WEBSITE = process.env.ADMITAD_WEBSITE_ID || "2990785";
 const AE_CLIENT_ID = process.env.AE_CLIENT_ID || "";
 const AE_CLIENT_SECRET = process.env.AE_CLIENT_SECRET || "";
 const AE_USER_ID = process.env.AE_USER_ID || "";
+const ADVERTISER = process.env.ADVERTISER_NAME || "ООО «Алиэкспресс (РУ)», ИНН 7703380158";
 
 const bot = new Bot(TOKEN);
 
@@ -33,6 +34,13 @@ async function sb(path, opts = {}) {
 async function saveProduct(p) {
     try { await sb("products?on_conflict=source,external_id", { method: "POST", body: p, prefer: "return=representation,resolution=merge-duplicates" }); }
     catch (e) { console.log("⚠️ БД: " + e.message); }
+}
+
+// ── МАРКИРОВКА (ФЗ-38) ───────────────────────────────────
+function eridOf(link) { const m = String(link).match(/erid=([A-Za-z0-9_]+)/i); return m ? m[1] : ""; }
+function markFooter(ref) {
+    const e = eridOf(ref);
+    return "\n\nРеклама. " + ADVERTISER + (e ? ", erid: " + e : "");
 }
 
 // ── ADMITAD ──────────────────────────────────────────────
@@ -75,7 +83,7 @@ async function getAliCoupons() {
     return all.filter(c => /aliexpress/i.test(String(c.advcampaign_name || "")));
 }
 
-// ── AE PLATFORM (подборки товаров) ───────────────────────
+// ── AE PLATFORM (подборки) ───────────────────────────────
 let aeToken = null, aeExp = 0;
 function aeReady() { return !!(AE_CLIENT_ID && AE_CLIENT_SECRET && AE_USER_ID); }
 async function aeGetToken() {
@@ -148,7 +156,7 @@ async function runCoupon(uid) {
         if (!coupons.length) { await bot.api.sendMessageToUser(uid, "😕 У AliExpress сейчас нет активных купонов в Admitad."); return; }
         const c = coupons[0];
         const r = await makeAdmitadLink(c.url || "https://aliexpress.ru/");
-        const ok = await postToChannel(couponCard(c, r.link));
+        const ok = await postToChannel(couponCard(c, r.link) + markFooter(r.link));
         await bot.api.sendMessageToUser(uid, ok ? `✅ Купон в канале! (всего нашёл: ${coupons.length})` : "❌ Не выложил.");
     } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Admitad: " + e.message); }
 }
@@ -163,7 +171,7 @@ async function runSelection(uid) {
         await bot.api.sendMessageToUser(uid, "⏳ Ищу товары с комиссией и продажами…");
         const items = await aeTopProducts();
         if (!items.length) { await bot.api.sendMessageToUser(uid, "😕 Фид пустой."); return; }
-        const post = ["👀 Сосед нашёл! Топ-3 находки 🔥", ""].concat(items.map((a, i) => productBlock(i + 1, a))).join("\n\n");
+        const post = ["👀 Сосед нашёл! Топ-3 находки 🔥", ""].concat(items.map((a, i) => productBlock(i + 1, a))).join("\n\n") + markFooter("");
         const ok = await postToChannel(post);
         for (const a of items) {
             await saveProduct({ source: "aliexpress", external_id: String(a.itemId), title: a.title || "", price_new: feedPrice(a) || null, image_url: a.imageURL || null, original_url: a.pageURL || "", ref_url: a.pageURL || "", category: "auto", status: "posted", posted_at: new Date().toISOString() });
@@ -195,9 +203,9 @@ bot.hears(/.*/, async (ctx) => {
             const parts = text.split("|").map(s => s.trim());
             let ok;
             if (parts[1]) {
-                ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : "", "", "👉 Забрать со скидкой:", r.link].join("\n"));
+                ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : "", "", "👉 Забрать со скидкой:", r.link].join("\n") + markFooter(r.link));
             } else {
-                ok = await postToChannel(["👀 Сосед нашёл!", "", "🔥 Годная находка — цена по ссылке 👇", "", "👉 Забрать со скидкой:", r.link].join("\n"));
+                ok = await postToChannel(["👀 Сосед нашёл!", "", "🔥 Годная находка — цена по ссылке 👇", "", "👉 Забрать со скидкой:", r.link].join("\n") + markFooter(r.link));
             }
             await saveProduct({ source: "aliexpress", external_id: (link[0].match(/item\/(\d+)/) || [])[1] || link[0], title: parts[1] || link[0], price_new: Number((parts[2] || "").replace(/\D/g, "")) || null, original_url: link[0], ref_url: r.link, category: "manual", status: "posted", posted_at: new Date().toISOString() });
             await bot.api.sendMessageToUser(uid, (ok ? "✅ Пост в канале! Комиссия капает 💰\n" : "❌ В канал не выложил.\n") + "🔗 Твоя реф-ссылка:\n" + r.link);
@@ -206,7 +214,7 @@ bot.hears(/.*/, async (ctx) => {
     }
 
     if (low === "тест") {
-        const ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ Набор из 10 бесшовных заколок для волос", "💰 Было 309 ₽ → стало 99 ₽ (−68%)", "", "👉 Забрать со скидкой:", "https://aliexpress.ru/one-price"].join("\n"));
+        const ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ Набор из 10 бесшовных заколок для волос", "💰 Было 309 ₽ → стало 99 ₽ (−68%)", "", "👉 Забрать со скидкой:", "https://aliexpress.ru/one-price"].join("\n") + markFooter(""));
         await bot.api.sendMessageToUser(uid, ok ? "✅ Тест в канале!" : "❌ Не вышло.");
     }
 });
@@ -220,5 +228,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v8 (купон + подборка) запущен");
+console.log("🚀 «Сосед нашёл!» v8.1 (маркировка ФЗ-38) запущен");
 bot.start();
