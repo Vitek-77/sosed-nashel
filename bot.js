@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.2: исправлена опечатка в deeplink (advcampaign_id)
+// v7.3: вход в Admitad через готовый base64-ключ
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -10,6 +10,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
 const ADM_CLIENT = process.env.ADMITAD_CLIENT_ID || "";
 const ADM_SECRET = process.env.ADMITAD_CLIENT_SECRET || "";
+const ADM_BASIC = process.env.ADMITAD_BASIC || "";
 
 const bot = new Bot(TOKEN);
 
@@ -33,16 +34,17 @@ let admToken = null, admExp = 0, aliCampaignId = null;
 
 async function admGetToken() {
     if (admToken && Date.now() < admExp) return admToken;
-    const basic = Buffer.from(ADM_CLIENT + ":" + ADM_SECRET).toString("base64");
+    const basic = ADM_BASIC || Buffer.from(ADM_CLIENT + ":" + ADM_SECRET).toString("base64");
     const res = await fetch("https://api.admitad.com/token/", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: "Basic " + basic },
         body: new URLSearchParams({ grant_type: "client_credentials" })
     });
+    const txt = await res.text();
+    console.log("🔑 Admitad token (" + res.status + "): " + txt.slice(0, 200));
     if (!res.ok) throw new Error("Admitad token HTTP " + res.status);
-    const j = await res.json();
+    const j = JSON.parse(txt);
     admToken = j.access_token; admExp = Date.now() + 30 * 60 * 1000;
-    console.log("🔑 Admitad: токен получен");
     return admToken;
 }
 async function admGet(path) {
@@ -71,10 +73,7 @@ async function makeAdmitadLink(url) {
     const txt = await res.text();
     console.log("🔗 Deeplink ответ (" + res.status + "): " + txt.slice(0, 300));
     if (!res.ok) throw new Error("deeplink HTTP " + res.status);
-    try {
-        const j = JSON.parse(txt);
-        return j.url || url;
-    } catch (e) { return url; }
+    try { return JSON.parse(txt).url || url; } catch (e) { return url; }
 }
 async function getAliCoupons() {
     const j = await admGet("/coupons/?limit=100&status=active");
@@ -120,7 +119,7 @@ bot.hears(/.*/, async (ctx) => {
             const c = coupons[0];
             const ref = await makeAdmitadLink(c.url || "https://aliexpress.ru/");
             const ok = await postToChannel(couponCard(c, ref));
-            await bot.api.sendMessageToUser(uid, ok ? `✅ Купон в канале! (нашлось всего: ${coupons.length})` : "❌ Не выложил.");
+            await bot.api.sendMessageToUser(uid, ok ? `✅ Купон в канале! (всего: ${coupons.length})` : "❌ Не выложил.");
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Admitad: " + e.message); }
         return;
     }
@@ -158,5 +157,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.2 (исправлен deeplink) запущен");
+console.log("🚀 «Сосед нашёл!» v7.3 (base64-вход в Admitad) запущен");
 bot.start();
