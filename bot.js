@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.7: умный поиск кампании AliExpress + логи списка программ
+// v7.8: номер кампании из переменной (без поиска)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -12,6 +12,7 @@ const ADM_CLIENT = process.env.ADMITAD_CLIENT_ID || "";
 const ADM_SECRET = process.env.ADMITAD_CLIENT_SECRET || "";
 const ADM_BASIC = process.env.ADMITAD_BASIC || "";
 const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites";
+const ADM_CAMPAIGN = process.env.ADMITAD_CAMPAIGN_ID || "";
 
 const bot = new Bot(TOKEN);
 
@@ -56,13 +57,18 @@ async function admGet(path) {
 }
 async function findAliCampaign() {
     if (aliCampaignId) return aliCampaignId;
+    if (ADM_CAMPAIGN) {
+        aliCampaignId = ADM_CAMPAIGN;
+        console.log("🎯 Кампания из переменной: " + aliCampaignId);
+        return aliCampaignId;
+    }
     try {
         const j = await admGet("/advcampaigns/?limit=100");
         const list = j.advcampaigns || j.data || [];
-        console.log("🎯 Программ найдено: " + list.length + " | первые: " + list.slice(0, 5).map(c => c.name).join(" / "));
+        console.log("🎯 Программ найдено: " + list.length + " | raw: " + JSON.stringify(j).slice(0, 300));
         const ali = list.filter(c => /aliexpress/i.test(c.name || ""));
         const ru = ali.find(c => /RU|CIS/i.test(c.name)) || ali[0] || list[0];
-        aliCampaignId = ru ? ru.id : null;
+        aliCampaignId = ru ? String(ru.id) : null;
         console.log("🎯 Кампания AliExpress: id=" + aliCampaignId + " (" + (ru ? ru.name : "не найдена") + ")");
     } catch (e) { console.log("⚠️ Поиск кампании: " + e.message); }
     return aliCampaignId;
@@ -74,7 +80,7 @@ async function makeAdmitadLink(url) {
     const res = await fetch("https://api.admitad.com/deeplink/", {
         method: "POST",
         headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" },
-        body: JSON.stringify({ url, advcampaign_id: cid })
+        body: JSON.stringify({ url, advcampaign_id: Number(cid) })
     });
     const txt = await res.text();
     console.log("🔗 Deeplink ответ (" + res.status + "): " + txt.slice(0, 300));
@@ -163,5 +169,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.7 (умный поиск кампании) запущен");
+console.log("🚀 «Сосед нашёл!» v7.8 (кампания из переменной) запущен");
 bot.start();
