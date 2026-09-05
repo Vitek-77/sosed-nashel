@@ -41,7 +41,7 @@ async function admGetToken() {
         body: new URLSearchParams({
             grant_type: "client_credentials",
             client_id: ADM_CLIENT,
-            scope: "advcampaigns websites coupons deeplink banners"
+            scope: process.env.ADMITAD_SCOPE || "advcampaigns banners websites"
         })
     });
     const txt = await res.text();
