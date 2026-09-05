@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.4: ключи Admitad и в шапке, и в теле запроса
+// v7.5: токен Admitad ТОЧНО по документации (добавлен scope)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -29,7 +29,7 @@ async function saveProduct(p) {
     catch (e) { console.log("⚠️ БД: " + e.message); }
 }
 
-// ── ADMITAD ──────────────────────────────────────────────
+// ── ADMITAD (по официальной документации) ────────────────
 let admToken = null, admExp = 0, aliCampaignId = null;
 
 async function admGetToken() {
@@ -37,8 +37,12 @@ async function admGetToken() {
     const basic = ADM_BASIC || Buffer.from(ADM_CLIENT + ":" + ADM_SECRET).toString("base64");
     const res = await fetch("https://api.admitad.com/token/", {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: "Basic " + basic },
-        body: new URLSearchParams({ grant_type: "client_credentials", client_id: ADM_CLIENT, client_secret: ADM_SECRET })
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", Authorization: "Basic " + basic },
+        body: new URLSearchParams({
+            grant_type: "client_credentials",
+            client_id: ADM_CLIENT,
+            scope: "advcampaigns websites coupons deeplink banners"
+        })
     });
     const txt = await res.text();
     console.log("🔑 Admitad token (" + res.status + "): " + txt.slice(0, 200));
@@ -157,5 +161,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.4 (ключи в теле запроса) запущен");
+console.log("🚀 «Сосед нашёл!» v7.5 (scope по документации) запущен");
 bot.start();
