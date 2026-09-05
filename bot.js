@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v9.1: надёжное чтение фида (заголовки, ретрай, счётчики)
+// v9.2: исправлен парсер фида (id из offer id=, проценты надёжно)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -75,20 +75,24 @@ async function getAliCoupons() {
     return (j.coupons || []).filter(c => /aliexpress/i.test(String(c.advcampaign_name || "")));
 }
 
-// ── ЧТЕНИЕ ФИДА (надёжное, со счётчиками) ────────────────
+// ── ПАРСЕР ФИДА v2 (id из <offer id=…>) ──────────────────
 function parseOffer(b) {
     const g = (re) => { const m = b.match(re); return m ? m[1] : ""; };
+    const id = g(/<offer[^>]*\bid="(\d{6,})"/) || ((b.match(/item(?:%252F|%2F|\/)(\d{6,})/) || [])[1] || "");
     const url = g(/<url>([\s\S]*?)<\/url>/);
-    const idm = url.match(/item%2F(\d{6,})/) || url.match(/item\/(\d{6,})/);
+    let discount = parseInt(g(/<discount[^>]*>(\d{1,3})/)) || 0;
+    let commission = parseFloat(g(/<commission[^>]*>([\d.]+)/)) || 0;
+    if ((!discount || !commission)) {
+        const two = b.match(/(\d{1,3})%\s*<\/[^>]+>\s*<[^>]+>\s*([\d.]+)\s*%/);
+        if (two) { discount = discount || parseInt(two[1]); commission = commission || parseFloat(two[2]); }
+    }
+    const img = g(/<(?:img|picture)[^>]*>(https?:[^<]+)<\/(?:img|picture)>/)
+        || g(/(https:\/\/ae-pic[^<\s"]+?\.(?:jpg|png))/)
+        || g(/(https:\/\/[^<\s"]*alicdn[^<\s"]+?\.(?:jpg|png))/);
     return {
-        url,
-        id: idm ? idm[1] : "",
+        id, url,
         name: decode(g(/<name>([\s\S]*?)<\/name>/) || g(/<title>([\s\S]*?)<\/title>/)),
-        price: g(/<price>([\d.]+)/),
-        oldPrice: g(/<old_price>([\d.]+)/),
-        discount: parseInt(g(/<discount>(\d+)/)) || 0,
-        commission: parseFloat(g(/<commission>([\d.]+)/)) || 0,
-        img: g(/<(?:img|picture)>(https?:[\s\S]*?)<\/(?:img|picture)>/)
+        discount, commission, img
     };
 }
 function goodOffer(o) {
@@ -122,7 +126,7 @@ async function fetchFeedOffers(want = 30) {
                 let m;
                 while ((m = buf.match(/<offer[\s\S]*?<\/offer>/))) {
                     const block = m[0];
-                    if (first) { console.log("🧬 Пример offer: " + block.slice(0, 400)); first = false; }
+                    if (first) { console.log("🧬 Пример offer: " + block.slice(0, 1200)); first = false; }
                     buf = buf.slice(buf.indexOf(block) + block.length);
                     seen++;
                     const o = parseOffer(block);
@@ -277,5 +281,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v9.1 (надёжный фид) запущен");
+console.log("🚀 «Сосед нашёл!» v9.2 (парсер фида исправлен) запущен");
 bot.start();
