@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.1: Admitad (исправлен вход) + ручные команды. Без расписания.
+// v7.2: исправлена опечатка в deeplink (advcampaign_id)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -28,7 +28,7 @@ async function saveProduct(p) {
     catch (e) { console.log("⚠️ БД: " + e.message); }
 }
 
-// ── ADMITAD: вход через Basic-заголовок (так требует API) ─
+// ── ADMITAD ──────────────────────────────────────────────
 let admToken = null, admExp = 0, aliCampaignId = null;
 
 async function admGetToken() {
@@ -66,12 +66,15 @@ async function makeAdmitadLink(url) {
     const res = await fetch("https://api.admitad.com/deeplink/", {
         method: "POST",
         headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" },
-        body: JSON.stringify({ url, advacampaign_id: cid })
+        body: JSON.stringify({ url, advcampaign_id: cid })
     });
+    const txt = await res.text();
+    console.log("🔗 Deeplink ответ (" + res.status + "): " + txt.slice(0, 300));
     if (!res.ok) throw new Error("deeplink HTTP " + res.status);
-    const j = await res.json();
-    console.log("🔗 Реф-ссылка: " + (j.url || "нет"));
-    return j.url || url;
+    try {
+        const j = JSON.parse(txt);
+        return j.url || url;
+    } catch (e) { return url; }
 }
 async function getAliCoupons() {
     const j = await admGet("/coupons/?limit=100&status=active");
@@ -110,7 +113,6 @@ bot.hears(/.*/, async (ctx) => {
     if (!uid || String(info.type).includes("channel")) return;
     const low = text.trim().toLowerCase();
 
-    // ── КУПОН ──
     if (low === "купон" || low === "промокод") {
         try {
             const coupons = await getAliCoupons();
@@ -123,7 +125,6 @@ bot.hears(/.*/, async (ctx) => {
         return;
     }
 
-    // ── ССЫЛКА НА ТОВАР → РЕФ-ССЫЛКА ЧЕРЕЗ ADMITAD ──
     const link = text.match(/https?:\/\/[^\s|]+/);
     if (link && /aliexpress\.(ru|com)/i.test(link[0])) {
         await bot.api.sendMessageToUser(uid, "⏳ Делаю реф-ссылку через Admitad…");
@@ -142,14 +143,12 @@ bot.hears(/.*/, async (ctx) => {
         return;
     }
 
-    // ── ТЕСТ ──
     if (low === "тест") {
         const ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ Набор из 10 бесшовных заколок для волос", "💰 Было 309 ₽ → стало 99 ₽ (−68%)", "", "👉 Забрать со скидкой:", "https://aliexpress.ru/one-price"].join("\n"));
         await bot.api.sendMessageToUser(uid, ok ? "✅ Тест в канале!" : "❌ Не вышло.");
     }
 });
 
-// ── ВЕБ-СЕРВЕР + АВТОПЕРЕЗАПУСК ──────────────────────────
 const http = await import("node:http");
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => { res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }); res.end("Сосед нашёл! работает ✅"); }).listen(port, () => console.log("🌐 Веб-сервер на порту " + port));
@@ -159,5 +158,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.1 (Admitad, ручной режим) запущен");
+console.log("🚀 «Сосед нашёл!» v7.2 (исправлен deeplink) запущен");
 bot.start();
