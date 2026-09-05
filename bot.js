@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.3: вход в Admitad через готовый base64-ключ
+// v7.4: ключи Admitad и в шапке, и в теле запроса
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -38,7 +38,7 @@ async function admGetToken() {
     const res = await fetch("https://api.admitad.com/token/", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: "Basic " + basic },
-        body: new URLSearchParams({ grant_type: "client_credentials" })
+        body: new URLSearchParams({ grant_type: "client_credentials", client_id: ADM_CLIENT, client_secret: ADM_SECRET })
     });
     const txt = await res.text();
     console.log("🔑 Admitad token (" + res.status + "): " + txt.slice(0, 200));
@@ -157,5 +157,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.3 (base64-вход в Admitad) запущен");
+console.log("🚀 «Сосед нашёл!» v7.4 (ключи в теле запроса) запущен");
 bot.start();
