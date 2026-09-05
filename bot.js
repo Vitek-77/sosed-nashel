@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v14: русские названия прямо со страницы товара
+// v15: точные цены/названия со страницы + запасные переводчики
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -15,10 +15,6 @@ const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites de
 const ADM_CAMPAIGN = process.env.ADMITAD_CAMPAIGN_ID || "25179";
 const ADM_WEBSITE = process.env.ADMITAD_WEBSITE_ID || "2990785";
 const ADVERTISER = process.env.ADVERTISER_NAME || "ООО «Алиэкспресс (РУ)», ИНН 7703380158";
-const USD_RATE = Number(process.env.USD_RATE || 95);
-
-// ⛔ НЕ АФФ магазины (верх списка из таблицы Admitad)
-const NON_AFF = new Set(("1103489061,1104030822,1104037812,3010045,2800188,1104981079,911355049,1104031803,5070109,1104977094,911842395,1104977191,4776002,1103191382,1980682,1103472625,1104206902,911207215,2684007,1105175794,1104904457,1102210530,1105180541,608229,411294,1105131001,1577002,1105184508,1105226069,1105378045,1100115010,1104527004,1103330495,911755149,911058180,1102191945,1104631533,1105003602,910358408,1103203642,1105324765,204419,405501,1103864887,911812026,1105348580,1102092452,2939001,1104474060,911705531,5204010,1104160567,808990,1105223248,1367236,3889024,911971085,1104704612,5250176,2539007,5098062,4555045,1103657098,1105145263,1102634703,1971225,1103156072,2415022,4669071,1105185626,1719259,1105215075,912151410,1951301,1105092455,1105175729,1086484,4664082,1103370334,1104931660,1104554261,2983032,3988037,5796744,1102989116,912618659,815336,2135107,2287083,5146085,4586015,1103187789,911055219,1104889053,5880442,1472219,1103337287,5791687,1104931478,1102305001,1102196689,5244086,912432424,4392085,609719,1100324072,1104094069,910341212,1104338277,5208015,1105057251,1104074752,1103266478,805486,2828069,811228,1103276470,1105216738,1104067514,1102425440,911833474,1159132,1105181620,1104111857,1103474448,1104802041,734047,912067676,4383081,5374134,911944912,1102056225,1953865,4847079,4998286,1971296,1103614199,4067001,1105250239,900246095,605052,1102597618,1103554327,1104781423,2227131,1105280985,1020605,4921004,1103812459,3097060,932490,219072,1103886793,911735070,3251001,5034021,1105134507,1102291325,1103739106,830007,4658150,5161049,912170163,1487249,4743011,510887,911820138,911683032,1104913427,2393002,3193060,5628349,912564544,1103797110,4376032,1034164,1105209551,1105381909,2744003,1105185563,5077386,1105437829,5437112,3093007,911797189,1779070,3660007,5798857,803871,1103335351,2934031,912151058,1105074345,1105244708,1104399110,1086609,1945231,912115092,5214003").split(","));
 
 const bot = new Bot(TOKEN);
 
@@ -40,41 +36,44 @@ function fmt(n) { return String(Math.round(Number(n))).replace(/\B(?=(\d{3})+(?!
 function eridOf(link) { const m = String(link).match(/erid=([A-Za-z0-9_]+)/i); return m ? m[1] : ""; }
 function markLine(ref) { const e = eridOf(ref); return "Реклама. " + ADVERTISER + (e ? ", erid: " + e : ""); }
 function dec(s) { return String(s || "").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">"); }
+const hasRu = (s) => /[а-яА-ЯЁё]{3,}/.test(s || "");
 
-// ── РУССКОЕ НАЗВАНИЕ СО СТРАНИЦЫ ТОВАРА ─────────────────
-async function fetchRuTitle(id) {
+// ── ДАННЫЕ СО СТРАНИЦЫ ТОВАРА (название + цена) ──────────
+async function fetchRuData(id) {
     try {
-        const res = await fetch(`https://aliexpress.ru/item/${id}.html`, {
-            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", "Accept-Language": "ru-RU,ru;q=0.9" }
-        });
-        if (!res.ok) { console.log("🏷️ RU-страница: статус " + res.status); return ""; }
+        const res = await fetch(`https://aliexpress.ru/item/${id}.html`, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", "Accept-Language": "ru-RU,ru;q=0.9" } });
+        if (!res.ok) { console.log("🏷️ Страница: статус " + res.status); return null; }
         const html = await res.text();
-        const m = html.match(/property="og:title"[^>]*content="([^"]+)"/) || html.match(/<title[^>]*>([\s\S]*?)<\/title>/);
-        const t = dec(m ? m[1] : "").replace(/\s*[-|]\s*AliExpress.*$/i, "").trim();
-        if (t && /[\u0400-\u04FF]/.test(t)) { console.log("🏷️ Название: со страницы (RU)"); return t; }
-        console.log("🏷️ RU-страница без русского заголовка");
-    } catch (e) { console.log("🏷️ RU-страница: " + e.message); }
-    return "";
+        const g = (re) => { const m = html.match(re); return m ? m[1] : ""; };
+        let title = dec(g(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/) || g(/<title[^>]*>([^<]+)<\/title>/) || g(/"subject":"([^"]+)"/)).trim();
+        if (!hasRu(title)) title = "";
+        const price = g(/"price":\s*\{[^}]*"value":\s*"?([\d.]+)"?/) || g(/"price":"([\d.]+)"/) || g(/"minPrice":\s*"?([\d.]+)"?/);
+        const oldPrice = g(/"originalPrice":\s*\{[^}]*"value":\s*"?([\d.]+)"?/) || g(/"originalPrice":"([\d.]+)"/);
+        console.log(`🏷️ Страница: title=${(title || "-").slice(0, 40)} | price=${price || "-"} | old=${oldPrice || "-"}`);
+        return { title, price: Number(price) || 0, oldPrice: Number(oldPrice) || 0 };
+    } catch (e) { console.log("🏷️ Страница: " + e.message); return null; }
 }
-// ── ПЕРЕВОД (запасной) ──────────────────────────────────
+
+// ── ПЕРЕВОД (цепочка запасных сервисов) ──────────────────
 async function translateName(s) {
-    if (!/[A-Za-z]{3,}/.test(s)) return s;
-    const q = s.slice(0, 400);
+    if (!/[A-Za-z]{3,}/.test(s) || hasRu(s)) return s;
+    const q = encodeURIComponent(s.slice(0, 400));
+    for (const host of ["lingva.ml", "lingva.lunar.icu", "translate.plausibility.cloud"]) {
+        try {
+            const r = await fetch(`https://${host}/api/v1/en/ru/${q}`);
+            if (r.ok) { const j = await r.json(); const t = j?.translation; if (hasRu(t)) { console.log("🏷️ Перевод: " + host); return t; } }
+        } catch (e) {}
+    }
     try {
-        const r = await fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ru&dt=t&q=" + encodeURIComponent(q));
-        if (r.ok) { const j = await r.json(); const t = Array.isArray(j) && Array.isArray(j[0]) ? j[0].map(x => (x && x[0]) || "").join("") : ""; if (t && /[\u0400-\u04FF]/.test(t)) { console.log("🏷️ Название: Google-перевод"); return t; } }
-        else console.log("⚠️ Google перевод: статус " + r.status);
-    } catch (e) { console.log("⚠️ Google перевод: " + e.message); }
+        const r = await fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ru&dt=t&q=" + q);
+        if (r.ok) { const j = await r.json(); const t = Array.isArray(j) && Array.isArray(j[0]) ? j[0].map(x => (x && x[0]) || "").join("") : ""; if (hasRu(t)) { console.log("🏷️ Перевод: Google"); return t; } }
+    } catch (e) {}
     try {
-        const r = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(q) + "&langpair=en|ru");
-        if (r.ok) { const j = await r.json(); const t = j?.responseData?.translatedText; if (t && /[\u0400-\u04FF]/.test(t) && !/WARNING/i.test(t)) { console.log("🏷️ Название: MyMemory"); return t; } }
-        else console.log("⚠️ MyMemory: статус " + r.status);
-    } catch (e) { console.log("⚠️ MyMemory: " + e.message); }
-    console.log("⚠️ Перевод не удался — оставляю английский");
+        const r = await fetch("https://api.mymemory.translated.net/get?q=" + q + "&langpair=en|ru");
+        if (r.ok) { const j = await r.json(); const t = j?.responseData?.translatedText; if (hasRu(t) && !/WARNING/i.test(t)) { console.log("🏷️ Перевод: MyMemory"); return t; } }
+    } catch (e) {}
+    console.log("🏷️ Перевод не удался — оставляю английский");
     return s;
-}
-async function getRuName(id, enName) {
-    return (await fetchRuTitle(id)) || (await translateName(enName)) ;
 }
 
 // ── ADMITAD ──────────────────────────────────────────────
@@ -119,19 +118,13 @@ async function getAliCoupons() {
 function parseOffer(b) {
     const g = (re) => { const m = b.match(re); return m ? m[1] : ""; };
     const id = g(/<offer[^>]*\bid="(\d{6,})"/) || ((b.match(/item(?:%252F|%2F|\/)(\d{6,})/) || [])[1] || "");
-    const price = parseFloat(g(/<price>([\d.]+)</)) || 0;
-    const old = parseFloat(g(/<oldprice>([\d.]+)</) || g(/<old_price>([\d.]+)</)) || 0;
     let discount = parseInt(g(/<[^>]+>\s*(\d{1,3})\s*%\s*<\/[^>]+>/)) || 0;
-    if (!discount && old > price && old > 0) discount = Math.round((1 - price / old) * 100);
-    const commission = parseFloat(g(/<[^>]+>\s*(\d+\.\d+)\s*%\s*<\/[^>]+>/)) || 0;
     const img = g(/<(?:img|picture)[^>]*>(https?:[^<]+)<\/(?:img|picture)>/);
-    return { id, price, old, discount, commission, img, name: dec(g(/<name>([\s\S]*?)<\/name>/) || g(/<title>([\s\S]*?)<\/title>/)) };
+    return { id, discount, img, name: dec(g(/<name>([\s\S]*?)<\/name>/) || g(/<title>([\s\S]*?)<\/title>/)) };
 }
 function passes(o) {
     if (!o.id || !o.img) return false;
-    if (o.price < 0.5) return false;
     if (o.discount < 40) return false;
-    if (o.commission > 0 && o.commission < 3) return false;
     if (/difference|supplement|postage|freight|after sales|shipping|surcharge|custom|do not|not sell|special link|payment|deposit|test|sample|fee|repair|link only|spare parts/i.test(o.name)) return false;
     if (o.name.length < 15) return false;
     return true;
@@ -189,6 +182,18 @@ async function publish(bodyText, ref, imgUrl) {
     return true;
 }
 
+// ── КАРТОЧКА (только проверенные цифры) ─────────────────
+function cardLines(name, page) {
+    const L = ["📌 Сосед нашёл!", "", "🏷️ " + name];
+    if (page && page.price > 0) {
+        L.push("💰 " + (page.oldPrice > page.price ? `Было ${fmt(page.oldPrice)} ₽ → стало ` : "") + `${fmt(page.price)} ₽`);
+        if (page.oldPrice > page.price) L.push("💥 Скидка −" + Math.round((1 - page.price / page.oldPrice) * 100) + "%");
+    } else {
+        L.push("💥 Скидка по ссылке 👇");
+    }
+    return L;
+}
+
 // ── СЛУЖЕБНЫЕ ────────────────────────────────────────────
 function getText(ctx) {
     if (ctx.text && typeof ctx.text === "string") return ctx.text;
@@ -212,7 +217,7 @@ bot.hears(/.*/, async (ctx) => {
 
     // ── ПОСТ = случайный товар ──
     if (low === "пост" || low === "подборка" || low === "post") {
-        await bot.api.sendMessageToUser(uid, "⏳ Ищу товар со скидкой и русским названием…");
+        await bot.api.sendMessageToUser(uid, "⏳ Ищу товар, проверяю цену и название…");
         try {
             if (!POOL.length) await fillPool(150);
             if (!POOL.length) { await bot.api.sendMessageToUser(uid, "😕 Пул пуст."); return; }
@@ -221,18 +226,17 @@ bot.hears(/.*/, async (ctx) => {
                 let o = POOL[Math.floor(Math.random() * POOL.length)];
                 for (let i = 0; i < 10; i++) { const c = POOL[Math.floor(Math.random() * POOL.length)]; if (!LAST.has(c.id)) { o = c; break; } }
                 LAST.add(o.id);
-                const r = await makeAdmitadLink(`https://aliexpress.ru/item/${o.id}.html`);
+                const clean = `https://aliexpress.ru/item/${o.id}.html`;
+                const r = await makeAdmitadLink(clean);
                 if (r.affiliate === false) { console.log("⚠️ Не аффилиат: " + o.id); continue; }
-                const name = String(await getRuName(o.id, o.name)).slice(0, 90);
-                const p = Math.round(o.price * USD_RATE), op = Math.round((o.old || 0) * USD_RATE);
-                const body = ["📌 Сосед нашёл!", "", "🏷️ " + name];
-                if (p > 0) body.push("💰 " + (op > p ? `Было ${fmt(op)} ₽ → стало ` : "") + `около ${fmt(p)} ₽`);
-                if (o.discount) body.push("💥 Скидка −" + o.discount + "%");
-                await publish(body.join("\n"), r.link, o.img);
-                await saveProduct({ source: "aliexpress", external_id: o.id, title: name, price_new: p || null, discount_percent: o.discount, image_url: o.img, original_url: `https://aliexpress.ru/item/${o.id}.html`, ref_url: r.link, category: "auto", status: "posted", posted_at: new Date().toISOString() });
+                const page = await fetchRuData(o.id);
+                let name = page?.title || "";
+                if (!name) name = String(await translateName(o.name)).slice(0, 90);
+                await publish(cardLines(name, page).join("\n"), r.link, o.img);
+                await saveProduct({ source: "aliexpress", external_id: o.id, title: name, price_new: page?.price || null, image_url: o.img, original_url: clean, ref_url: r.link, category: "auto", status: "posted", posted_at: new Date().toISOString() });
                 posted = true;
             }
-            await bot.api.sendMessageToUser(uid, posted ? "✅ Карточка в канале!" : "😕 Все 5 кандидатов неаффилиатные — кинь «пост» ещё раз.");
+            await bot.api.sendMessageToUser(uid, posted ? "✅ Карточка в канале!" : "😕 Все кандидаты неаффилиатные — кинь «пост» ещё раз.");
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ " + e.message); }
         return;
     }
@@ -255,8 +259,6 @@ bot.hears(/.*/, async (ctx) => {
     // ── ССЫЛКА вручную ──
     const link = text.match(/https?:\/\/[^\s|]+/);
     if (link && /aliexpress\.(ru|com)/i.test(link[0])) {
-        const sm = link[0].match(/\/store\/(\d+)/);
-        if (sm && NON_AFF.has(sm[1])) { await bot.api.sendMessageToUser(uid, "⛔ Магазин из списка НЕАФФИЛИАТНЫХ — не постим."); return; }
         const parts = text.split("|").map(s => s.trim());
         if (!parts[1]) { await bot.api.sendMessageToUser(uid, "✍️ Пришли: ссылка | название | цена | старая цена"); return; }
         await bot.api.sendMessageToUser(uid, "⏳ Проверяю комиссию…");
@@ -265,7 +267,7 @@ bot.hears(/.*/, async (ctx) => {
             if (r.affiliate === false) { await bot.api.sendMessageToUser(uid, "❌ Комиссия НЕ платится — не постим."); return; }
             const body = ["📌 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : ""].filter(Boolean).join("\n");
             await publish(body, r.link, null);
-            await saveProduct({ source: "aliexpress", external_id: (link[0].match(/item\/(\d+)/) || [])[1] || sm?.[1] || link[0], title: parts[1], price_new: Number((parts[2] || "").replace(/\D/g, "")) || null, original_url: link[0], ref_url: r.link, category: "manual", status: "posted", posted_at: new Date().toISOString() });
+            await saveProduct({ source: "aliexpress", external_id: (link[0].match(/item\/(\d+)/) || [])[1] || link[0], title: parts[1], price_new: Number((parts[2] || "").replace(/\D/g, "")) || null, original_url: link[0], ref_url: r.link, category: "manual", status: "posted", posted_at: new Date().toISOString() });
             await bot.api.sendMessageToUser(uid, "✅ Пост в канале! Комиссия капает 💰");
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ " + e.message); }
         return;
@@ -286,5 +288,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v14 (RU-названия со страницы) запущен");
+console.log("🚀 «Сосед нашёл!» v15 (точные цены + запасные переводчики) запущен");
 bot.start();
