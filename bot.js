@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v9: АВТОПОДБОРКИ из товарного фида Admitad (фото+скидка+комиссия)
+// v9.1: надёжное чтение фида (заголовки, ретрай, счётчики)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -15,9 +15,6 @@ const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites de
 const ADM_CAMPAIGN = process.env.ADMITAD_CAMPAIGN_ID || "25179";
 const ADM_WEBSITE = process.env.ADMITAD_WEBSITE_ID || "2990785";
 const ADM_FEED = process.env.ADMITAD_FEED_URL || "";
-const AE_CLIENT_ID = process.env.AE_CLIENT_ID || "";
-const AE_CLIENT_SECRET = process.env.AE_CLIENT_SECRET || "";
-const AE_USER_ID = process.env.AE_USER_ID || "";
 const ADVERTISER = process.env.ADVERTISER_NAME || "ООО «Алиэкспресс (РУ)», ИНН 7703380158";
 
 const bot = new Bot(TOKEN);
@@ -78,7 +75,7 @@ async function getAliCoupons() {
     return (j.coupons || []).filter(c => /aliexpress/i.test(String(c.advcampaign_name || "")));
 }
 
-// ── ЧТЕНИЕ ФИДА ПОТОКОМ (без скачивания целиком) ──────────
+// ── ЧТЕНИЕ ФИДА (надёжное, со счётчиками) ────────────────
 function parseOffer(b) {
     const g = (re) => { const m = b.match(re); return m ? m[1] : ""; };
     const url = g(/<url>([\s\S]*?)<\/url>/);
@@ -97,41 +94,57 @@ function parseOffer(b) {
 function goodOffer(o) {
     if (!o.id || !o.img) return false;
     if (o.discount < 40 || o.commission < 3) return false;
-    if (/test|difference|shipping|supplement|postage|freight|custom|do not|link only/i.test(o.name)) return false;
+    if (/test|difference|shipping|supplement|postage|freight|custom|do not|after sales|paypay|link only|surcharge/i.test(o.name)) return false;
     if (o.name.length < 15) return false;
     return true;
 }
 async function fetchFeedOffers(want = 30) {
     if (!ADM_FEED) throw new Error("нет ADMITAD_FEED_URL");
-    const ctrl = new AbortController();
-    const offers = [];
-    try {
-        const res = await fetch(ADM_FEED, { signal: ctrl.signal });
-        if (!res.ok) throw new Error("feed HTTP " + res.status);
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "", first = true;
-        while (true) {
-            const r = await reader.read();
-            if (r.done) break;
-            buf += dec.decode(r.value, { stream: true });
-            let m;
-            while ((m = buf.match(/<offer[\s\S]*?<\/offer>/))) {
-                const block = m[0];
-                if (first) { console.log("🧬 Пример offer: " + block.slice(0, 600)); first = false; }
-                buf = buf.slice(buf.indexOf(block) + block.length);
-                const o = parseOffer(block);
-                if (goodOffer(o)) offers.push(o);
-                if (offers.length >= want) { ctrl.abort(); return offers; }
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        const ctrl = new AbortController();
+        const offers = [];
+        let bytes = 0, seen = 0;
+        try {
+            const res = await fetch(ADM_FEED, {
+                signal: ctrl.signal,
+                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "*/*", "Accept-Encoding": "identity" }
+            });
+            if (!res.ok) throw new Error("feed HTTP " + res.status);
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "", first = true;
+            while (true) {
+                const r = await reader.read();
+                if (r.done) break;
+                bytes += r.value.length;
+                buf += dec.decode(r.value, { stream: true });
+                let m;
+                while ((m = buf.match(/<offer[\s\S]*?<\/offer>/))) {
+                    const block = m[0];
+                    if (first) { console.log("🧬 Пример offer: " + block.slice(0, 400)); first = false; }
+                    buf = buf.slice(buf.indexOf(block) + block.length);
+                    seen++;
+                    const o = parseOffer(block);
+                    if (goodOffer(o)) offers.push(o);
+                    if (offers.length >= want) {
+                        ctrl.abort();
+                        console.log(`📊 Поток остановлен: ${(bytes / 1048576).toFixed(1)} МБ, просмотрено ${seen}, отобрано ${offers.length}`);
+                        return offers;
+                    }
+                }
+                if (buf.length > 300000) buf = buf.slice(-150000);
             }
-            if (buf.length > 300000) buf = buf.slice(-150000);
+            console.log(`📊 Поток завершён: ${(bytes / 1048576).toFixed(1)} МБ, просмотрено ${seen}, отобрано ${offers.length}`);
+            if (offers.length) return offers;
+            throw new Error("фид прочитан, но подходящих товаров 0");
+        } catch (e) {
+            lastErr = e;
+            console.log(`⚠️ Попытка ${attempt}: ${e.message} | МБ: ${(bytes / 1048576).toFixed(1)}, просмотрено: ${seen}, отобрано: ${offers.length}`);
+            if (offers.length) return offers;
         }
-    } catch (e) {
-        if (offers.length) return offers;
-        if (/abort/i.test(e.message)) return offers;
-        throw e;
     }
-    return offers;
+    throw lastErr || new Error("фид не дал товаров");
 }
 
 // ── ПОСТ С ФОТО ──────────────────────────────────────────
@@ -169,7 +182,7 @@ function couponCard(c, ref) {
     return ["🎟 ПРОМОКОД: " + (c.code || c.coupon_code || "—"), "💥 " + (c.discount || ""), "📝 " + (c.description || ""), "⏰ до " + (c.expiration_date ? String(c.expiration_date).slice(0, 10) : "—"), "", "👉 Активировать:", ref].join("\n");
 }
 
-// ── АВТОПОДБОРКА ИЗ ФИДА ─────────────────────────────────
+// ── АВТОПОДБОРКА ─────────────────────────────────────────
 async function runSelection(ctx, uid) {
     await bot.api.sendMessageToUser(uid, "⏳ Сканирую фид: ищу жирные скидки с комиссией…");
     try {
@@ -191,7 +204,7 @@ async function runSelection(ctx, uid) {
                 posted++;
             } catch (e) { console.log("⚠️ Товар " + o.id + ": " + e.message); }
         }
-        await bot.api.sendMessageToUser(uid, posted ? `✅ Готово! Карточек с фото в канале: ${posted}` : "😕 Все кандидаты оказались без комиссии — попробуй ещё раз.");
+        await bot.api.sendMessageToUser(uid, posted ? `✅ Готово! Карточек с фото в канале: ${posted}` : "😕 Все кандидаты без комиссии — попробуй ещё раз.");
     } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Фид: " + e.message); }
 }
 
@@ -264,5 +277,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v9 (автоподборки из фида) запущен");
+console.log("🚀 «Сосед нашёл!» v9.1 (надёжный фид) запущен");
 bot.start();
