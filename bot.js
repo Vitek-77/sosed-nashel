@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v8.2: + команда "фототест" (пост с картинкой)
+// v9: АВТОПОДБОРКИ из товарного фида Admitad (фото+скидка+комиссия)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -14,6 +14,7 @@ const ADM_BASIC = process.env.ADMITAD_BASIC || "";
 const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites deeplink_generator coupons";
 const ADM_CAMPAIGN = process.env.ADMITAD_CAMPAIGN_ID || "25179";
 const ADM_WEBSITE = process.env.ADMITAD_WEBSITE_ID || "2990785";
+const ADM_FEED = process.env.ADMITAD_FEED_URL || "";
 const AE_CLIENT_ID = process.env.AE_CLIENT_ID || "";
 const AE_CLIENT_SECRET = process.env.AE_CLIENT_SECRET || "";
 const AE_USER_ID = process.env.AE_USER_ID || "";
@@ -21,7 +22,7 @@ const ADVERTISER = process.env.ADVERTISER_NAME || "ООО «Алиэкспрес
 
 const bot = new Bot(TOKEN);
 
-// ── ОБЛАЧНАЯ ПАМЯТЬ ──────────────────────────────────────
+// ── ПАМЯТЬ/МАРКИРОВКА ────────────────────────────────────
 async function sb(path, opts = {}) {
     const res = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
         method: opts.method || "GET",
@@ -35,13 +36,9 @@ async function saveProduct(p) {
     try { await sb("products?on_conflict=source,external_id", { method: "POST", body: p, prefer: "return=representation,resolution=merge-duplicates" }); }
     catch (e) { console.log("⚠️ БД: " + e.message); }
 }
-
-// ── МАРКИРОВКА (ФЗ-38) ───────────────────────────────────
 function eridOf(link) { const m = String(link).match(/erid=([A-Za-z0-9_]+)/i); return m ? m[1] : ""; }
-function markFooter(ref) {
-    const e = eridOf(ref);
-    return "\n\nРеклама. " + ADVERTISER + (e ? ", erid: " + e : "");
-}
+function markFooter(ref) { const e = eridOf(ref); return "\n\nРеклама. " + ADVERTISER + (e ? ", erid: " + e : ""); }
+function decode(s) { return String(s || "").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">"); }
 
 // ── ADMITAD ──────────────────────────────────────────────
 let admToken = null, admExp = 0;
@@ -78,57 +75,66 @@ async function getAliCoupons() {
     const res = await fetch("https://api.admitad.com/coupons/?limit=100&status=active", { headers: { Authorization: "Bearer " + t } });
     if (!res.ok) throw new Error("coupons HTTP " + res.status);
     const j = await res.json();
-    const all = j.coupons || [];
-    if (all[0]) console.log("🧾 Пример купона: " + JSON.stringify(all[0]).slice(0, 300));
-    return all.filter(c => /aliexpress/i.test(String(c.advcampaign_name || "")));
+    return (j.coupons || []).filter(c => /aliexpress/i.test(String(c.advcampaign_name || "")));
 }
 
-// ── AE PLATFORM (подборки) ───────────────────────────────
-let aeToken = null, aeExp = 0;
-function aeReady() { return !!(AE_CLIENT_ID && AE_CLIENT_SECRET && AE_USER_ID); }
-async function aeGetToken() {
-    if (aeToken && Date.now() < aeExp) return aeToken;
-    const res = await fetch("https://oauth2.aeplatform.ru/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ grant_type: "client_credentials", client_id: AE_CLIENT_ID, client_secret: AE_CLIENT_SECRET })
-    });
-    if (!res.ok) throw new Error("AE token HTTP " + res.status);
-    const j = await res.json();
-    aeToken = j.access_token; aeExp = Date.now() + 25 * 60 * 1000;
-    return aeToken;
+// ── ЧТЕНИЕ ФИДА ПОТОКОМ (без скачивания целиком) ──────────
+function parseOffer(b) {
+    const g = (re) => { const m = b.match(re); return m ? m[1] : ""; };
+    const url = g(/<url>([\s\S]*?)<\/url>/);
+    const idm = url.match(/item%2F(\d{6,})/) || url.match(/item\/(\d{6,})/);
+    return {
+        url,
+        id: idm ? idm[1] : "",
+        name: decode(g(/<name>([\s\S]*?)<\/name>/) || g(/<title>([\s\S]*?)<\/title>/)),
+        price: g(/<price>([\d.]+)/),
+        oldPrice: g(/<old_price>([\d.]+)/),
+        discount: parseInt(g(/<discount>(\d+)/)) || 0,
+        commission: parseFloat(g(/<commission>([\d.]+)/)) || 0,
+        img: g(/<(?:img|picture)>(https?:[\s\S]*?)<\/(?:img|picture)>/)
+    };
 }
-async function aeGet(path) {
-    const t = await aeGetToken();
-    const res = await fetch("https://api2.aeplatform.ru" + path, { headers: { Authorization: "Bearer " + t } });
-    if (!res.ok) throw new Error("AE " + res.status + " " + path);
-    return res.json();
+function goodOffer(o) {
+    if (!o.id || !o.img) return false;
+    if (o.discount < 40 || o.commission < 3) return false;
+    if (/test|difference|shipping|supplement|postage|freight|custom|do not|link only/i.test(o.name)) return false;
+    if (o.name.length < 15) return false;
+    return true;
 }
-async function aeTopProducts() {
-    const feeds = await aeGet("/api/v1/productsfeeds/feeds?limit=5");
-    const feedId = feeds?.data?.[0]?.id;
-    if (!feedId) throw new Error("нет фида");
-    const j = await aeGet(`/api/v1/productsfeeds/products?productFeedId=${feedId}&limit=30&localityType=all&sort=byCommissionRate&page=1`);
-    const items = (j.data || []).map(x => x.attributes || {});
-    items.sort((a, b) => Number(b.purchasesAmount || 0) - Number(a.purchasesAmount || 0));
-    return items.slice(0, 3);
-}
-function feedPrice(a) {
-    const c = Number(a?.price?.cents || 0);
-    return c > 1000 ? Math.round(c / 100) : c;
-}
-function productBlock(i, a) {
-    const L = [`${i}️⃣ ${a.title || "Товар с AliExpress"}`];
-    const extra = [];
-    if (a.rating) extra.push("⭐ " + String(a.rating).replace(".", ","));
-    if (a.purchasesAmount) extra.push("🛒 купили: " + fmt(a.purchasesAmount));
-    if (extra.length) L.push(extra.join(" | "));
-    if (feedPrice(a)) L.push(`💰 ${fmt(feedPrice(a))} ₽`);
-    L.push("👉 " + (a.pageURL || ""));
-    return L.join("\n");
+async function fetchFeedOffers(want = 30) {
+    if (!ADM_FEED) throw new Error("нет ADMITAD_FEED_URL");
+    const ctrl = new AbortController();
+    const offers = [];
+    try {
+        const res = await fetch(ADM_FEED, { signal: ctrl.signal });
+        if (!res.ok) throw new Error("feed HTTP " + res.status);
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "", first = true;
+        while (true) {
+            const r = await reader.read();
+            if (r.done) break;
+            buf += dec.decode(r.value, { stream: true });
+            let m;
+            while ((m = buf.match(/<offer[\s\S]*?<\/offer>/))) {
+                const block = m[0];
+                if (first) { console.log("🧬 Пример offer: " + block.slice(0, 600)); first = false; }
+                buf = buf.slice(buf.indexOf(block) + block.length);
+                const o = parseOffer(block);
+                if (goodOffer(o)) offers.push(o);
+                if (offers.length >= want) { ctrl.abort(); return offers; }
+            }
+            if (buf.length > 300000) buf = buf.slice(-150000);
+        }
+    } catch (e) {
+        if (offers.length) return offers;
+        if (/abort/i.test(e.message)) return offers;
+        throw e;
+    }
+    return offers;
 }
 
-// ── ПОСТ С ФОТО (механика MAX) ───────────────────────────
+// ── ПОСТ С ФОТО ──────────────────────────────────────────
 async function postWithPhoto(ctx, text, imgUrl) {
     const res = await fetch(imgUrl);
     if (!res.ok) throw new Error("фото HTTP " + res.status);
@@ -139,6 +145,11 @@ async function postWithPhoto(ctx, text, imgUrl) {
     const image = await ctx.api.uploadImage({ source: path });
     await ctx.api.sendMessageToChat(CHANNEL_ID, text, { attachments: [image.toJson()] });
     console.log("📢 Пост с фото опубликован!");
+}
+async function postToChannel(text) {
+    if (!CHANNEL_ID) { console.log("⚠️ CHANNEL_ID не задан"); return false; }
+    try { await bot.api.sendMessageToChat(CHANNEL_ID, text); console.log("📢 Пост опубликован!"); return true; }
+    catch (e) { console.log("⚠️ Пост не вышел: " + (e?.message ?? e)); return false; }
 }
 
 // ── СЛУЖЕБНЫЕ ────────────────────────────────────────────
@@ -154,13 +165,34 @@ function chatInfo(ctx) {
     const c = ctx.chat || ctx.message?.chat || ctx.message?.recipient || {};
     return { id: c.chat_id ?? c.id ?? null, type: c.chat_type ?? c.type ?? "?" };
 }
-async function postToChannel(text) {
-    if (!CHANNEL_ID) { console.log("⚠️ CHANNEL_ID не задан"); return false; }
-    try { await bot.api.sendMessageToChat(CHANNEL_ID, text); console.log("📢 Пост опубликован!"); return true; }
-    catch (e) { console.log("⚠️ Пост не вышел: " + (e?.message ?? e)); return false; }
-}
 function couponCard(c, ref) {
     return ["🎟 ПРОМОКОД: " + (c.code || c.coupon_code || "—"), "💥 " + (c.discount || ""), "📝 " + (c.description || ""), "⏰ до " + (c.expiration_date ? String(c.expiration_date).slice(0, 10) : "—"), "", "👉 Активировать:", ref].join("\n");
+}
+
+// ── АВТОПОДБОРКА ИЗ ФИДА ─────────────────────────────────
+async function runSelection(ctx, uid) {
+    await bot.api.sendMessageToUser(uid, "⏳ Сканирую фид: ищу жирные скидки с комиссией…");
+    try {
+        const offers = await fetchFeedOffers(30);
+        console.log("🎯 Отобрано кандидатов: " + offers.length);
+        if (!offers.length) { await bot.api.sendMessageToUser(uid, "😕 В фиде не нашлось подходящих товаров."); return; }
+        offers.sort((a, b) => b.discount - a.discount);
+        const top = offers.slice(0, 3);
+        let posted = 0;
+        for (const o of top) {
+            try {
+                const clean = `https://aliexpress.ru/item/${o.id}.html`;
+                const r = await makeAdmitadLink(clean);
+                if (!r.affiliate) { console.log("⚠️ Не аффилиат: " + o.id); continue; }
+                const text = ["👀 Сосед нашёл!", "", "🏷️ " + o.name, `💥 Скидка −${o.discount}%`, "", "👉 Забрать со скидкой:", r.link].join("\n") + markFooter(r.link);
+                try { await postWithPhoto(ctx, text, o.img); }
+                catch (e) { console.log("⚠️ Фото не вышло: " + e.message); await postToChannel(text); }
+                await saveProduct({ source: "aliexpress", external_id: o.id, title: o.name, price_new: null, discount_percent: o.discount, image_url: o.img, original_url: clean, ref_url: r.link, category: "auto", status: "posted", posted_at: new Date().toISOString() });
+                posted++;
+            } catch (e) { console.log("⚠️ Товар " + o.id + ": " + e.message); }
+        }
+        await bot.api.sendMessageToUser(uid, posted ? `✅ Готово! Карточек с фото в канале: ${posted}` : "😕 Все кандидаты оказались без комиссии — попробуй ещё раз.");
+    } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Фид: " + e.message); }
 }
 
 async function runCoupon(uid) {
@@ -174,39 +206,13 @@ async function runCoupon(uid) {
     } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Admitad: " + e.message); }
 }
 
-async function runSelection(ctx, uid) {
-    if (!aeReady()) {
-        await bot.api.sendMessageToUser(uid, "🛒 Поиск ТОВАРОВ включится, когда добавим ключи AE Platform. А пока — купон 👇");
-        await runCoupon(uid);
-        return;
-    }
-    try {
-        await bot.api.sendMessageToUser(uid, "⏳ Ищу товары с комиссией и продажами…");
-        const items = await aeTopProducts();
-        if (!items.length) { await bot.api.sendMessageToUser(uid, "😕 Фид пустой."); return; }
-        const post = ["👀 Сосед нашёл! Топ-3 находки 🔥", ""].concat(items.map((a, i) => productBlock(i + 1, a))).join("\n\n") + markFooter("");
-        let ok = false;
-        try {
-            if (items[0]?.imageURL) await postWithPhoto(ctx, post, items[0].imageURL);
-            else ok = await postToChannel(post);
-            ok = true;
-        } catch (e) { console.log("⚠️ Фото-пост не вышел, шлю текстом: " + e.message); ok = await postToChannel(post); }
-        for (const a of items) {
-            await saveProduct({ source: "aliexpress", external_id: String(a.itemId), title: a.title || "", price_new: feedPrice(a) || null, image_url: a.imageURL || null, original_url: a.pageURL || "", ref_url: a.pageURL || "", category: "auto", status: "posted", posted_at: new Date().toISOString() });
-        }
-        await bot.api.sendMessageToUser(uid, ok ? "✅ Подборка в канале!" : "❌ Не выложил.");
-    } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ AE: " + e.message); }
-}
-
 async function runPhotoTest(ctx, uid) {
     const demoUrl = "https://ae04.alicdn.com/kf/S1c00c769b2de4ea78cf5fdd606738f2e4.jpg_480x480.jpg";
     await bot.api.sendMessageToUser(uid, "⏳ Собираю пост с картинкой…");
     try {
         await postWithPhoto(ctx, "👀 Сосед нашёл! Тест поста с фото 📸\n\n🏷️ Так будут выглядеть карточки товаров с картинкой" + markFooter(""), demoUrl);
         await bot.api.sendMessageToUser(uid, "✅ Пост с фото в канале! Смотри 👀");
-    } catch (e) {
-        await bot.api.sendMessageToUser(uid, "⚠️ Фото не удалось: " + e.message);
-    }
+    } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Фото не удалось: " + e.message); }
 }
 
 bot.hears(/.*/, async (ctx) => {
@@ -258,5 +264,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v8.2 (посты с фото) запущен");
+console.log("🚀 «Сосед нашёл!» v9 (автоподборки из фида) запущен");
 bot.start();
