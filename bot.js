@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.5: токен Admitad ТОЧНО по документации (добавлен scope)
+// v7.7: умный поиск кампании AliExpress + логи списка программ
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -11,6 +11,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
 const ADM_CLIENT = process.env.ADMITAD_CLIENT_ID || "";
 const ADM_SECRET = process.env.ADMITAD_CLIENT_SECRET || "";
 const ADM_BASIC = process.env.ADMITAD_BASIC || "";
+const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites";
 
 const bot = new Bot(TOKEN);
 
@@ -29,7 +30,7 @@ async function saveProduct(p) {
     catch (e) { console.log("⚠️ БД: " + e.message); }
 }
 
-// ── ADMITAD (по официальной документации) ────────────────
+// ── ADMITAD ──────────────────────────────────────────────
 let admToken = null, admExp = 0, aliCampaignId = null;
 
 async function admGetToken() {
@@ -38,11 +39,7 @@ async function admGetToken() {
     const res = await fetch("https://api.admitad.com/token/", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", Authorization: "Basic " + basic },
-        body: new URLSearchParams({
-            grant_type: "client_credentials",
-            client_id: ADM_CLIENT,
-            scope: process.env.ADMITAD_SCOPE || "advcampaigns banners websites"
-        })
+        body: new URLSearchParams({ grant_type: "client_credentials", client_id: ADM_CLIENT, scope: ADM_SCOPE })
     });
     const txt = await res.text();
     console.log("🔑 Admitad token (" + res.status + "): " + txt.slice(0, 200));
@@ -59,15 +56,20 @@ async function admGet(path) {
 }
 async function findAliCampaign() {
     if (aliCampaignId) return aliCampaignId;
-    const j = await admGet("/advcampaigns/?name=AliExpress&limit=10");
-    const list = j.advcampaigns || [];
-    const ru = list.find(c => /RU|CIS/i.test(c.name)) || list[0];
-    aliCampaignId = ru ? ru.id : null;
-    console.log("🎯 Кампания AliExpress: id=" + aliCampaignId + " (" + (ru ? ru.name : "не найдена") + ")");
+    try {
+        const j = await admGet("/advcampaigns/?limit=100");
+        const list = j.advcampaigns || j.data || [];
+        console.log("🎯 Программ найдено: " + list.length + " | первые: " + list.slice(0, 5).map(c => c.name).join(" / "));
+        const ali = list.filter(c => /aliexpress/i.test(c.name || ""));
+        const ru = ali.find(c => /RU|CIS/i.test(c.name)) || ali[0] || list[0];
+        aliCampaignId = ru ? ru.id : null;
+        console.log("🎯 Кампания AliExpress: id=" + aliCampaignId + " (" + (ru ? ru.name : "не найдена") + ")");
+    } catch (e) { console.log("⚠️ Поиск кампании: " + e.message); }
     return aliCampaignId;
 }
 async function makeAdmitadLink(url) {
     const cid = await findAliCampaign();
+    if (!cid) throw new Error("не найдена кампания AliExpress");
     const t = await admGetToken();
     const res = await fetch("https://api.admitad.com/deeplink/", {
         method: "POST",
@@ -161,5 +163,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.5 (scope по документации) запущен");
+console.log("🚀 «Сосед нашёл!» v7.7 (умный поиск кампании) запущен");
 bot.start();
