@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v8.1: + маркировка "Реклама" + erid из ссылки (ФЗ-38)
+// v8.2: + команда "фототест" (пост с картинкой)
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -128,6 +128,19 @@ function productBlock(i, a) {
     return L.join("\n");
 }
 
+// ── ПОСТ С ФОТО (механика MAX) ───────────────────────────
+async function postWithPhoto(ctx, text, imgUrl) {
+    const res = await fetch(imgUrl);
+    if (!res.ok) throw new Error("фото HTTP " + res.status);
+    const buf = Buffer.from(await res.arrayBuffer());
+    const fs = await import("node:fs");
+    const path = "/tmp/photo_" + Date.now() + ".jpg";
+    fs.writeFileSync(path, buf);
+    const image = await ctx.api.uploadImage({ source: path });
+    await ctx.api.sendMessageToChat(CHANNEL_ID, text, { attachments: [image.toJson()] });
+    console.log("📢 Пост с фото опубликован!");
+}
+
 // ── СЛУЖЕБНЫЕ ────────────────────────────────────────────
 function getText(ctx) {
     if (ctx.text && typeof ctx.text === "string") return ctx.text;
@@ -161,7 +174,7 @@ async function runCoupon(uid) {
     } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Admitad: " + e.message); }
 }
 
-async function runSelection(uid) {
+async function runSelection(ctx, uid) {
     if (!aeReady()) {
         await bot.api.sendMessageToUser(uid, "🛒 Поиск ТОВАРОВ включится, когда добавим ключи AE Platform. А пока — купон 👇");
         await runCoupon(uid);
@@ -172,12 +185,28 @@ async function runSelection(uid) {
         const items = await aeTopProducts();
         if (!items.length) { await bot.api.sendMessageToUser(uid, "😕 Фид пустой."); return; }
         const post = ["👀 Сосед нашёл! Топ-3 находки 🔥", ""].concat(items.map((a, i) => productBlock(i + 1, a))).join("\n\n") + markFooter("");
-        const ok = await postToChannel(post);
+        let ok = false;
+        try {
+            if (items[0]?.imageURL) await postWithPhoto(ctx, post, items[0].imageURL);
+            else ok = await postToChannel(post);
+            ok = true;
+        } catch (e) { console.log("⚠️ Фото-пост не вышел, шлю текстом: " + e.message); ok = await postToChannel(post); }
         for (const a of items) {
             await saveProduct({ source: "aliexpress", external_id: String(a.itemId), title: a.title || "", price_new: feedPrice(a) || null, image_url: a.imageURL || null, original_url: a.pageURL || "", ref_url: a.pageURL || "", category: "auto", status: "posted", posted_at: new Date().toISOString() });
         }
         await bot.api.sendMessageToUser(uid, ok ? "✅ Подборка в канале!" : "❌ Не выложил.");
     } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ AE: " + e.message); }
+}
+
+async function runPhotoTest(ctx, uid) {
+    const demoUrl = "https://ae04.alicdn.com/kf/S1c00c769b2de4ea78cf5fdd606738f2e4.jpg_480x480.jpg";
+    await bot.api.sendMessageToUser(uid, "⏳ Собираю пост с картинкой…");
+    try {
+        await postWithPhoto(ctx, "👀 Сосед нашёл! Тест поста с фото 📸\n\n🏷️ Так будут выглядеть карточки товаров с картинкой" + markFooter(""), demoUrl);
+        await bot.api.sendMessageToUser(uid, "✅ Пост с фото в канале! Смотри 👀");
+    } catch (e) {
+        await bot.api.sendMessageToUser(uid, "⚠️ Фото не удалось: " + e.message);
+    }
 }
 
 bot.hears(/.*/, async (ctx) => {
@@ -189,7 +218,8 @@ bot.hears(/.*/, async (ctx) => {
     const low = text.trim().toLowerCase();
 
     if (low === "купон" || low === "промокод") { await runCoupon(uid); return; }
-    if (low === "подборка" || low === "найди" || low === "поиск") { await runSelection(uid); return; }
+    if (low === "подборка" || low === "найди" || low === "поиск") { await runSelection(ctx, uid); return; }
+    if (low === "фототест") { await runPhotoTest(ctx, uid); return; }
 
     const link = text.match(/https?:\/\/[^\s|]+/);
     if (link && /aliexpress\.(ru|com)/i.test(link[0])) {
@@ -228,5 +258,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v8.1 (маркировка ФЗ-38) запущен");
+console.log("🚀 «Сосед нашёл!» v8.2 (посты с фото) запущен");
 bot.start();
