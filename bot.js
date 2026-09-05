@@ -1,6 +1,6 @@
 // ============================================================
 // 🛒 "СОСЕД НАШЁЛ!" — Москва и МО
-// v7.8: номер кампании из переменной (без поиска)
+// v7.9: официальный deeplink GET + проверка комиссии
 // ============================================================
 import { Bot } from "@maxhub/max-bot-api";
 
@@ -11,8 +11,9 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
 const ADM_CLIENT = process.env.ADMITAD_CLIENT_ID || "";
 const ADM_SECRET = process.env.ADMITAD_CLIENT_SECRET || "";
 const ADM_BASIC = process.env.ADMITAD_BASIC || "";
-const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites";
-const ADM_CAMPAIGN = process.env.ADMITAD_CAMPAIGN_ID || "";
+const ADM_SCOPE = process.env.ADMITAD_SCOPE || "advcampaigns banners websites deeplink_generator coupons";
+const ADM_CAMPAIGN = process.env.ADMITAD_CAMPAIGN_ID || "25179";
+const ADM_WEBSITE = process.env.ADMITAD_WEBSITE_ID || "2990785";
 
 const bot = new Bot(TOKEN);
 
@@ -32,7 +33,7 @@ async function saveProduct(p) {
 }
 
 // ── ADMITAD ──────────────────────────────────────────────
-let admToken = null, admExp = 0, aliCampaignId = null;
+let admToken = null, admExp = 0;
 
 async function admGetToken() {
     if (admToken && Date.now() < admExp) return admToken;
@@ -49,46 +50,27 @@ async function admGetToken() {
     admToken = j.access_token; admExp = Date.now() + 30 * 60 * 1000;
     return admToken;
 }
-async function admGet(path) {
-    const t = await admGetToken();
-    const res = await fetch("https://api.admitad.com" + path, { headers: { Authorization: "Bearer " + t } });
-    if (!res.ok) throw new Error("Admitad " + res.status + " " + path);
-    return res.json();
-}
-async function findAliCampaign() {
-    if (aliCampaignId) return aliCampaignId;
-    if (ADM_CAMPAIGN) {
-        aliCampaignId = ADM_CAMPAIGN;
-        console.log("🎯 Кампания из переменной: " + aliCampaignId);
-        return aliCampaignId;
-    }
-    try {
-        const j = await admGet("/advcampaigns/?limit=100");
-        const list = j.advcampaigns || j.data || [];
-        console.log("🎯 Программ найдено: " + list.length + " | raw: " + JSON.stringify(j).slice(0, 300));
-        const ali = list.filter(c => /aliexpress/i.test(c.name || ""));
-        const ru = ali.find(c => /RU|CIS/i.test(c.name)) || ali[0] || list[0];
-        aliCampaignId = ru ? String(ru.id) : null;
-        console.log("🎯 Кампания AliExpress: id=" + aliCampaignId + " (" + (ru ? ru.name : "не найдена") + ")");
-    } catch (e) { console.log("⚠️ Поиск кампании: " + e.message); }
-    return aliCampaignId;
-}
+
+// официальный deeplink: GET /deeplink/{w_id}/advcampaign/{c_id}/?ulp=...
 async function makeAdmitadLink(url) {
-    const cid = await findAliCampaign();
-    if (!cid) throw new Error("не найдена кампания AliExpress");
     const t = await admGetToken();
-    const res = await fetch("https://api.admitad.com/deeplink/", {
-        method: "POST",
-        headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" },
-        body: JSON.stringify({ url, advcampaign_id: Number(cid) })
+    const res = await fetch(`https://api.admitad.com/deeplink/${ADM_WEBSITE}/advcampaign/${ADM_CAMPAIGN}/?ulp=${encodeURIComponent(url)}`, {
+        headers: { Authorization: "Bearer " + t }
     });
     const txt = await res.text();
     console.log("🔗 Deeplink ответ (" + res.status + "): " + txt.slice(0, 300));
     if (!res.ok) throw new Error("deeplink HTTP " + res.status);
-    try { return JSON.parse(txt).url || url; } catch (e) { return url; }
+    const arr = JSON.parse(txt);
+    const first = Array.isArray(arr) ? arr[0] : null;
+    if (!first || !first.link) throw new Error("deeplink пустой");
+    return { link: first.link, affiliate: !!first.is_affiliate_product };
 }
+
 async function getAliCoupons() {
-    const j = await admGet("/coupons/?limit=100&status=active");
+    const t = await admGetToken();
+    const res = await fetch("https://api.admitad.com/coupons/?limit=100&status=active", { headers: { Authorization: "Bearer " + t } });
+    if (!res.ok) throw new Error("coupons HTTP " + res.status);
+    const j = await res.json();
     const all = j.coupons || [];
     if (all[0]) console.log("🧾 Пример купона: " + JSON.stringify(all[0]).slice(0, 300));
     return all.filter(c => /aliexpress/i.test(String(c.advcampaign_name || "")));
@@ -129,8 +111,8 @@ bot.hears(/.*/, async (ctx) => {
             const coupons = await getAliCoupons();
             if (!coupons.length) { await bot.api.sendMessageToUser(uid, "😕 У AliExpress сейчас нет активных купонов в Admitad."); return; }
             const c = coupons[0];
-            const ref = await makeAdmitadLink(c.url || "https://aliexpress.ru/");
-            const ok = await postToChannel(couponCard(c, ref));
+            const r = await makeAdmitadLink(c.url || "https://aliexpress.ru/");
+            const ok = await postToChannel(couponCard(c, r.link));
             await bot.api.sendMessageToUser(uid, ok ? `✅ Купон в канале! (всего: ${coupons.length})` : "❌ Не выложил.");
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Admitad: " + e.message); }
         return;
@@ -138,18 +120,22 @@ bot.hears(/.*/, async (ctx) => {
 
     const link = text.match(/https?:\/\/[^\s|]+/);
     if (link && /aliexpress\.(ru|com)/i.test(link[0])) {
-        await bot.api.sendMessageToUser(uid, "⏳ Делаю реф-ссылку через Admitad…");
+        await bot.api.sendMessageToUser(uid, "⏳ Проверяю комиссию и делаю реф-ссылку…");
         try {
-            const ref = await makeAdmitadLink(link[0]);
+            const r = await makeAdmitadLink(link[0]);
+            if (!r.affiliate) {
+                await bot.api.sendMessageToUser(uid, "❌ За этот товар комиссия НЕ платится — в канал не постим. Выбери другой.");
+                return;
+            }
             const parts = text.split("|").map(s => s.trim());
             let ok;
             if (parts[1]) {
-                ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : "", "", "👉 Забрать со скидкой:", ref].join("\n"));
+                ok = await postToChannel(["👀 Сосед нашёл!", "", "🏷️ " + parts[1], parts[2] ? "💰 " + (parts[3] ? `Было ${fmt(parts[3])} ₽ → стало ` : "") + fmt(parts[2]) + " ₽" : "", "", "👉 Забрать со скидкой:", r.link].join("\n"));
             } else {
-                ok = await postToChannel(["👀 Сосед нашёл!", "", "🔥 Годная находка — цена по ссылке 👇", "", "👉 Забрать со скидкой:", ref].join("\n"));
+                ok = await postToChannel(["👀 Сосед нашёл!", "", "🔥 Годная находка — цена по ссылке 👇", "", "👉 Забрать со скидкой:", r.link].join("\n"));
             }
-            await saveProduct({ source: "aliexpress", external_id: (link[0].match(/item\/(\d+)/) || [])[1] || link[0], title: parts[1] || link[0], price_new: Number((parts[2] || "").replace(/\D/g, "")) || null, original_url: link[0], ref_url: ref, category: "manual", status: "posted", posted_at: new Date().toISOString() });
-            await bot.api.sendMessageToUser(uid, (ok ? "✅ Пост в канале!\n" : "❌ В канал не выложил.\n") + "🔗 Твоя реф-ссылка:\n" + ref);
+            await saveProduct({ source: "aliexpress", external_id: (link[0].match(/item\/(\d+)/) || [])[1] || link[0], title: parts[1] || link[0], price_new: Number((parts[2] || "").replace(/\D/g, "")) || null, original_url: link[0], ref_url: r.link, category: "manual", status: "posted", posted_at: new Date().toISOString() });
+            await bot.api.sendMessageToUser(uid, (ok ? "✅ Пост в канале! Комиссия капает 💰\n" : "❌ В канал не выложил.\n") + "🔗 Твоя реф-ссылка:\n" + r.link);
         } catch (e) { await bot.api.sendMessageToUser(uid, "⚠️ Admitad: " + e.message); }
         return;
     }
@@ -169,5 +155,5 @@ process.on("unhandledRejection", (err) => {
     if (/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|fetch failed|socket|not valid JSON|Unexpected token/i.test(msg)) { console.log("🔄 Перезапускаюсь…"); process.exit(1); }
 });
 
-console.log("🚀 «Сосед нашёл!» v7.8 (кампания из переменной) запущен");
+console.log("🚀 «Сосед нашёл!» v7.9 (официальный deeplink + проверка комиссии) запущен");
 bot.start();
